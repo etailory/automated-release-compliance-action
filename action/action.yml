@@ -1,0 +1,28 @@
+name: 'Governor OS Compliance Action'
+description: 'Automated release note compliance verification for regulated industries (ISO 27001, SOC2, DORA). Provides free-tier log verification and premium OIDC-authenticated audit generation via the Governor OS web platform.'
+author: 'Governor OS'
+
+branding:
+  icon: 'shield'
+  color: 'blue'
+
+inputs:
+  github-token:
+    description: 'GitHub token used to read release events and authenticate API calls. Typically secrets.GITHUB_TOKEN.'
+    required: true
+
+  anthropic-federation-rule-id:
+    description: 'OIDC federation rule ID issued by the Governor OS platform. Enables keyless authentication for premium compliance features without storing long-lived secrets.'
+    required: false
+
+  anthropic-organization-id:
+    description: 'Governor OS organization ID. Used to scope premium compliance checks and audit trails to the correct tenant.'
+    required: false
+
+  anthropic-service-account-id:
+    description: 'Governor OS service account ID. Used alongside the federation rule to authenticate the action as a trusted CI principal during OIDC exchange.'
+    required: false
+
+runs:
+  using: 'node20'
+  main: 'index.js'
