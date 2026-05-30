@@ -1,0 +1,34 @@
+name: Claude Personal Chat
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: write       # Gör att Claude kan skapa filer och göra commits åt dig
+  pull-requests: write   # Gör att Claude kan svara i PR-kommentarer
+  issues: write          # Gör att Claude kan svara i Issue-kommentarer
+
+jobs:
+  claude_chat:
+    # Denna job körs ENDAST om du startar din kommentar med /claude
+    if: startsWith(github.event.comment.body, '/claude')
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. Checka ut repot så Claude ser alla dina filer
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # 2. Skicka din mobila prompt direkt in i Anthropics officiella action
+      - name: Run Claude Code
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          model: 'claude-3-5-sonnet'
+          
+          # Här skickas din kommentar (allt efter /claude) direkt som prompt till maskinen
+          prompt: ${{ github.event.comment.body }}
