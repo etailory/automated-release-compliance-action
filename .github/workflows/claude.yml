@@ -1,34 +1,39 @@
-name: Claude Personal Chat
+name: Claude Code
 
 on:
   issue_comment:
     types: [created]
-
-permissions:
-  contents: write       # Gör att Claude kan skapa filer och göra commits åt dig
-  pull-requests: write   # Gör att Claude kan svara i PR-kommentarer
-  issues: write          # Gör att Claude kan svara i Issue-kommentarer
+  pull_request_review_comment:
+    types: [created]
+  issues:
+    types: [opened, assigned]
+  pull_request_review:
+    types: [submitted]
 
 jobs:
-  claude_chat:
-    # Denna job körs ENDAST om du startar din kommentar med /claude
-    if: startsWith(github.event.comment.body, '/claude')
+  claude:
+    if: |
+      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
+      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
+      (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude')) ||
+      (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')))
     runs-on: ubuntu-latest
-
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      id-token: write
     steps:
-      # 1. Checka ut repot så Claude ser alla dina filer
-      - name: Checkout Repository
-        uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v6
         with:
-          fetch-depth: 0
+          fetch-depth: 1
 
-      # 2. Skicka din mobila prompt direkt in i Anthropics officiella action
       - name: Run Claude Code
-        uses: anthropics/claude-code-action@v1
+        id: claude
+        uses: anthropics/claude-code-action@main
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          model: 'claude-3-5-sonnet'
+          claude_args: |
+            model: 'claude-sonnet-4-6'
           
-          # Här skickas din kommentar (allt efter /claude) direkt som prompt till maskinen
-          prompt: ${{ github.event.comment.body }}
