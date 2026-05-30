@@ -1,10 +1,8 @@
-"use strict";
+import * as core from "@actions/core";
+import * as github from "@actions/github";
 
-const core = require("@actions/core");
-const github = require("@actions/github");
-
-const { evaluateChecklist } = require("./checklist");
-const { runPremiumAudit } = require("./premium");
+import { evaluateChecklist } from "./checklist.js";
+import { runPremiumAudit } from "./premium.js";
 
 /**
  * Pull a normalized release object out of the event payload.
@@ -14,7 +12,7 @@ const { runPremiumAudit } = require("./premium");
  * @param {object} context  github.context
  * @returns {{ release: object|null, body: string }}
  */
-function parseReleaseFromContext(context) {
+export function parseReleaseFromContext(context) {
   const payload = context.payload || {};
   const release = payload.release;
 
@@ -87,7 +85,7 @@ async function reportFreeTier(release, evaluation) {
   }
 }
 
-async function run() {
+export async function run() {
   try {
     const token = core.getInput("github-token", { required: true });
     const licenseKey = core.getInput("license-key");
@@ -118,8 +116,7 @@ async function run() {
     core.setOutput("tier", tier);
 
     if (licenseKey) {
-      // `token` will be used by the future backend bridge to enrich the audit
-      // (e.g. fetching commits/PRs in the release range).
+      // `token` will be used by the future backend bridge to enrich the audit.
       void token;
       await runPremiumAudit({
         licenseKey,
@@ -148,9 +145,7 @@ async function run() {
   }
 }
 
-// Only auto-run when invoked as the action entry point (not when required in tests).
-if (require.main === module) {
+// Only auto-run when invoked as the action entry point (not when imported in tests).
+if (import.meta.main) {
   run();
 }
-
-module.exports = { run, parseReleaseFromContext };

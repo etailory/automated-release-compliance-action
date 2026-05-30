@@ -1,5 +1,3 @@
-"use strict";
-
 /**
  * Premium-tier bridge (STUB).
  *
@@ -9,23 +7,21 @@
  * generation, and hard governance blocking.
  *
  * IMPORTANT: This stub deliberately does NOT send any data off the runner yet.
- * It only shapes and validates the payload so the integration contract is
- * stable before the backend exists. Replace `dispatchToBackend` with a real
- * authenticated HTTPS call when the SaaS endpoint is live.
+ * Replace `dispatchToBackend` with a real authenticated HTTPS call when the
+ * SaaS endpoint is live.
  */
 
 /** Where the hosted audit backend will eventually live. */
-const BACKEND_ENDPOINT =
+export const BACKEND_ENDPOINT =
   process.env.COMPLIANCE_BACKEND_URL || "https://api.example-compliance.dev/v1/audits";
 
 /**
  * Build the (future) request payload from the release context.
- * Kept pure and side-effect free so it is easy to unit test.
  * @param {object} release   Normalized release info.
  * @param {object} repo      { owner, repo }.
  * @returns {object}
  */
-function buildAuditPayload(release, repo) {
+export function buildAuditPayload(release, repo) {
   return {
     schemaVersion: "1.0",
     repository: `${repo.owner}/${repo.repo}`,
@@ -37,8 +33,6 @@ function buildAuditPayload(release, repo) {
       publishedAt: release.publishedAt,
       author: release.author,
     },
-    // The real backend will fan out to fetch the commits/PRs in the range and
-    // run the Claude-powered ISO control-mapping analysis server-side.
     requested: {
       isoControlMapping: true,
       evidencePdf: true,
@@ -48,21 +42,13 @@ function buildAuditPayload(release, repo) {
 }
 
 /**
- * Placeholder dispatch. Intentionally a no-op network call for the MVP.
- * @param {string} licenseKey
- * @param {object} payload
+ * Placeholder dispatch — intentionally a no-op for the MVP.
+ * @param {string} _licenseKey
+ * @param {object} _payload
  * @returns {Promise<{status: string, queued: boolean}>}
  */
-async function dispatchToBackend(licenseKey, payload) {
+export async function dispatchToBackend(_licenseKey, _payload) {
   // TODO: replace with an authenticated fetch() to BACKEND_ENDPOINT.
-  //   await fetch(BACKEND_ENDPOINT, {
-  //     method: "POST",
-  //     headers: {
-  //       "content-type": "application/json",
-  //       authorization: `Bearer ${licenseKey}`,
-  //     },
-  //     body: JSON.stringify(payload),
-  //   });
   return { status: "stubbed", queued: false };
 }
 
@@ -75,7 +61,7 @@ async function dispatchToBackend(licenseKey, payload) {
  * @param {object} args.logger     Minimal logger ({ info, warning, debug }).
  * @returns {Promise<{ prepared: boolean, endpoint: string, payload: object }>}
  */
-async function runPremiumAudit({ licenseKey, release, repo, logger }) {
+export async function runPremiumAudit({ licenseKey, release, repo, logger }) {
   if (!licenseKey) {
     throw new Error("runPremiumAudit called without a license key");
   }
@@ -93,5 +79,3 @@ async function runPremiumAudit({ licenseKey, release, repo, logger }) {
 
   return { prepared: true, endpoint: BACKEND_ENDPOINT, payload };
 }
-
-module.exports = { runPremiumAudit, buildAuditPayload, dispatchToBackend, BACKEND_ENDPOINT };
