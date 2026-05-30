@@ -55,14 +55,23 @@ jobs:
 
 ## Development
 
+The `src/` library and tests are written in **TypeScript**. Bun handles transpilation natively — no separate compile step is needed during development.
+
 ```bash
 bun install          # install root dependencies
-bun test             # run checklist unit tests
-bun run build        # bundle src/ -> dist/index.js
+bun test             # run TypeScript unit tests via bun:test
+bun run build        # bundle src/index.ts -> dist/index.js (node target)
 
 cd action && npm install   # install action-specific dependencies
 cd web && npm install      # install web server dependencies
 ```
+
+### TypeScript
+
+- Source: `src/*.ts` — strict TypeScript with shared interfaces in `src/types.ts`
+- Tests: `test/*.test.ts` — `bun:test` with typed assertions
+- Config: `tsconfig.json` — `moduleResolution: bundler`, `strict: true`
+- Build: Bun bundles the TypeScript entry point directly; no intermediate `.js` output in `src/`
 
 ## Project layout
 
@@ -74,12 +83,14 @@ action/             GitHub Action implementation (node20, OIDC-based)
 web/                Express API server for premium audit trail generation
   server.js         REST API: /api/v1/compliance/verify + /audit
   package.json      Web server dependencies (express)
-src/                Bun-native compliance checklist library
-  checklist.js      Free-tier compliance rules (ESM)
-  index.js          Action entry point (Bun ESM)
-  premium.js        Premium bridge stub (Bun ESM)
+src/                TypeScript compliance checklist library (Bun)
+  types.ts          Shared TypeScript interfaces
+  checklist.ts      Free-tier compliance rules
+  index.ts          Action entry point
+  premium.ts        Premium bridge stub
 dist/               Bundled output built via bun build
-test/               Unit tests (bun:test)
+test/               Unit tests (bun:test, TypeScript)
+tsconfig.json       TypeScript compiler configuration
 action.yml          Root action metadata (points to dist/index.js)
 LICENSE             MIT License
 ```

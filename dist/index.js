@@ -22709,11 +22709,11 @@ var require_github = __commonJS((exports) => {
   exports.getOctokit = getOctokit;
 });
 
-// src/index.js
+// src/index.ts
 var core = __toESM(require_core(), 1);
 var github = __toESM(require_github(), 1);
 
-// src/checklist.js
+// src/checklist.ts
 var ISSUE_REFERENCE = /(#\d+)|(\/issues\/\d+)|(\/pull\/\d+)|\b[A-Z][A-Z0-9]+-\d+\b/;
 var MIN_DESCRIPTION_WORDS = 8;
 var DEFAULT_RULES = [
@@ -22760,7 +22760,7 @@ function evaluateChecklist(body = "", ctx = {}, rules = DEFAULT_RULES) {
   };
 }
 
-// src/premium.js
+// src/premium.ts
 var BACKEND_ENDPOINT = process.env.COMPLIANCE_BACKEND_URL || "https://api.example-compliance.dev/v1/audits";
 function buildAuditPayload(release, repo) {
   return {
@@ -22784,7 +22784,12 @@ function buildAuditPayload(release, repo) {
 async function dispatchToBackend(_licenseKey, _payload) {
   return { status: "stubbed", queued: false };
 }
-async function runPremiumAudit({ licenseKey, release, repo, logger }) {
+async function runPremiumAudit({
+  licenseKey,
+  release,
+  repo,
+  logger
+}) {
   if (!licenseKey) {
     throw new Error("runPremiumAudit called without a license key");
   }
@@ -22797,9 +22802,9 @@ async function runPremiumAudit({ licenseKey, release, repo, logger }) {
   return { prepared: true, endpoint: BACKEND_ENDPOINT, payload };
 }
 
-// src/index.js
+// src/index.ts
 function parseReleaseFromContext(context2) {
-  const payload = context2.payload || {};
+  const payload = context2.payload ?? {};
   const release = payload.release;
   if (release) {
     return {
@@ -22810,13 +22815,13 @@ function parseReleaseFromContext(context2) {
         isPrerelease: Boolean(release.prerelease),
         isDraft: Boolean(release.draft),
         publishedAt: release.published_at || null,
-        author: release.author ? release.author.login : null,
+        author: release.author ? release.author.login ?? null : null,
         url: release.html_url || null
       },
       body: release.body || ""
     };
   }
-  const ref = payload.ref || context2.ref || "";
+  const ref = payload.ref ?? context2.ref ?? "";
   const tag = ref.replace(/^refs\/tags\//, "");
   return {
     release: tag ? {
@@ -22826,7 +22831,7 @@ function parseReleaseFromContext(context2) {
       isPrerelease: false,
       isDraft: false,
       publishedAt: null,
-      author: context2.actor || null,
+      author: context2.actor ?? null,
       url: null
     } : null,
     body: ""
@@ -22880,7 +22885,7 @@ async function run() {
       await runPremiumAudit({
         licenseKey,
         release,
-        repo: context2.repo,
+        repo: context2.repo ?? { owner: "", repo: "" },
         logger: {
           info: (m) => core.info(m),
           warning: (m) => core.warning(m),

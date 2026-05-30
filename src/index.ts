@@ -3,37 +3,41 @@ import * as github from "@actions/github";
 
 import { evaluateChecklist } from "./checklist.js";
 import { runPremiumAudit } from "./premium.js";
+import type { Release, EvaluateResult, ActionContext } from "./types.js";
 
 /**
  * Pull a normalized release object out of the event payload.
  *
  * Supports the `release` event (release.body) and falls back gracefully for
  * `push` tag events where no rich release body exists.
- * @param {object} context  github.context
- * @returns {{ release: object|null, body: string }}
  */
-export function parseReleaseFromContext(context) {
-  const payload = context.payload || {};
-  const release = payload.release;
+export function parseReleaseFromContext(context: ActionContext): {
+  release: Release | null;
+  body: string;
+} {
+  const payload = context.payload ?? {};
+  const release = payload.release as Record<string, unknown> | undefined;
 
   if (release) {
     return {
       release: {
-        tag: release.tag_name,
-        name: release.name || release.tag_name,
-        body: release.body || "",
+        tag: release.tag_name as string,
+        name: (release.name as string) || (release.tag_name as string),
+        body: (release.body as string) || "",
         isPrerelease: Boolean(release.prerelease),
         isDraft: Boolean(release.draft),
-        publishedAt: release.published_at || null,
-        author: release.author ? release.author.login : null,
-        url: release.html_url || null,
+        publishedAt: (release.published_at as string) || null,
+        author: release.author
+          ? ((release.author as { login: string }).login ?? null)
+          : null,
+        url: (release.html_url as string) || null,
       },
-      body: release.body || "",
+      body: (release.body as string) || "",
     };
   }
 
   // Tag push fallback: no release notes, but we can still report the ref.
-  const ref = payload.ref || context.ref || "";
+  const ref = (payload.ref as string | undefined) ?? context.ref ?? "";
   const tag = ref.replace(/^refs\/tags\//, "");
   return {
     release: tag
@@ -44,7 +48,7 @@ export function parseReleaseFromContext(context) {
           isPrerelease: false,
           isDraft: false,
           publishedAt: null,
-          author: context.actor || null,
+          author: context.actor ?? null,
           url: null,
         }
       : null,
@@ -53,7 +57,10 @@ export function parseReleaseFromContext(context) {
 }
 
 /** Render the free-tier checklist results to the GitHub job summary + log. */
-async function reportFreeTier(release, evaluation) {
+async function reportFreeTier(
+  release: Release,
+  evaluation: EvaluateResult
+): Promise<void> {
   core.info("─".repeat(60));
   core.info(`Release compliance check — ${release.name} (${release.tag})`);
   core.info(`Result: ${evaluation.score}/${evaluation.total} checks passed`);
@@ -81,17 +88,17 @@ async function reportFreeTier(release, evaluation) {
       .write();
   } catch (err) {
     // Summary is best-effort (e.g. unavailable in some runners); never fail on it.
-    core.debug(`Could not write job summary: ${err.message}`);
+    core.debug(`Could not write job summary: ${(err as Error).message}`);
   }
 }
 
-export async function run() {
+export async function run(): Promise<void> {
   try {
     const token = core.getInput("github-token", { required: true });
     const licenseKey = core.getInput("license-key");
     const failOnIncomplete = core.getBooleanInput("fail-on-incomplete");
 
-    const context = github.context;
+    const context = github.context as ActionContext;
     const { release, body } = parseReleaseFromContext(context);
 
     if (!release) {
@@ -121,11 +128,11 @@ export async function run() {
       await runPremiumAudit({
         licenseKey,
         release,
-        repo: context.repo,
+        repo: context.repo ?? { owner: "", repo: "" },
         logger: {
-          info: (m) => core.info(m),
-          warning: (m) => core.warning(m),
-          debug: (m) => core.debug(m),
+          info: (m: string) => core.info(m),
+          warning: (m: string) => core.warning(m),
+          debug: (m: string) => core.debug(m),
         },
       });
     } else {
@@ -141,7 +148,7 @@ export async function run() {
       );
     }
   } catch (error) {
-    core.setFailed(`Release compliance action failed: ${error.message}`);
+    core.setFailed(`Release compliance action failed: ${(error as Error).message}`);
   }
 }
 

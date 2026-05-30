@@ -11,17 +11,23 @@
  * SaaS endpoint is live.
  */
 
+import type {
+  Release,
+  Repo,
+  Logger,
+  AuditPayload,
+  DispatchResult,
+  PremiumAuditResult,
+} from "./types.js";
+
 /** Where the hosted audit backend will eventually live. */
-export const BACKEND_ENDPOINT =
+export const BACKEND_ENDPOINT: string =
   process.env.COMPLIANCE_BACKEND_URL || "https://api.example-compliance.dev/v1/audits";
 
 /**
  * Build the (future) request payload from the release context.
- * @param {object} release   Normalized release info.
- * @param {object} repo      { owner, repo }.
- * @returns {object}
  */
-export function buildAuditPayload(release, repo) {
+export function buildAuditPayload(release: Release, repo: Repo): AuditPayload {
   return {
     schemaVersion: "1.0",
     repository: `${repo.owner}/${repo.repo}`,
@@ -43,25 +49,29 @@ export function buildAuditPayload(release, repo) {
 
 /**
  * Placeholder dispatch — intentionally a no-op for the MVP.
- * @param {string} _licenseKey
- * @param {object} _payload
- * @returns {Promise<{status: string, queued: boolean}>}
  */
-export async function dispatchToBackend(_licenseKey, _payload) {
+export async function dispatchToBackend(
+  _licenseKey: string,
+  _payload: AuditPayload
+): Promise<DispatchResult> {
   // TODO: replace with an authenticated fetch() to BACKEND_ENDPOINT.
   return { status: "stubbed", queued: false };
 }
 
 /**
  * Premium entry point. Prepares the secure bridge; does not yet transmit data.
- * @param {object} args
- * @param {string} args.licenseKey
- * @param {object} args.release
- * @param {object} args.repo
- * @param {object} args.logger     Minimal logger ({ info, warning, debug }).
- * @returns {Promise<{ prepared: boolean, endpoint: string, payload: object }>}
  */
-export async function runPremiumAudit({ licenseKey, release, repo, logger }) {
+export async function runPremiumAudit({
+  licenseKey,
+  release,
+  repo,
+  logger,
+}: {
+  licenseKey: string;
+  release: Release;
+  repo: Repo;
+  logger: Logger;
+}): Promise<PremiumAuditResult> {
   if (!licenseKey) {
     throw new Error("runPremiumAudit called without a license key");
   }

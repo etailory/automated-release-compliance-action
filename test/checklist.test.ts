@@ -3,6 +3,7 @@ import { test, expect } from "bun:test";
 import { evaluateChecklist } from "../src/checklist.js";
 import { buildAuditPayload } from "../src/premium.js";
 import { parseReleaseFromContext } from "../src/index.js";
+import type { Release, Repo } from "../src/types.js";
 
 test("checklist passes for a well-documented release", () => {
   const body =
@@ -22,7 +23,7 @@ test("checklist detects a missing issue reference", () => {
   const body = "We shipped a bunch of internal refactors across the codebase today.";
   const result = evaluateChecklist(body);
   const issueCheck = result.results.find((r) => r.id === "has-issue-reference");
-  expect(issueCheck.ok).toBe(false);
+  expect(issueCheck?.ok).toBe(false);
 });
 
 test("checklist detects JIRA-style ticket references", () => {
@@ -30,13 +31,13 @@ test("checklist detects JIRA-style ticket references", () => {
     "Resolved the data export defect and refreshed the dashboard widgets. Ref ABC-1234.";
   const result = evaluateChecklist(body);
   const issueCheck = result.results.find((r) => r.id === "has-issue-reference");
-  expect(issueCheck.ok).toBe(true);
+  expect(issueCheck?.ok).toBe(true);
 });
 
 test("placeholder bodies are rejected", () => {
   const result = evaluateChecklist("TBD");
   const placeholderCheck = result.results.find((r) => r.id === "not-placeholder");
-  expect(placeholderCheck.ok).toBe(false);
+  expect(placeholderCheck?.ok).toBe(false);
 });
 
 test("parseReleaseFromContext reads a release event payload", () => {
@@ -54,8 +55,8 @@ test("parseReleaseFromContext reads a release event payload", () => {
       },
     },
   });
-  expect(release.tag).toBe("v1.2.0");
-  expect(release.author).toBe("octocat");
+  expect(release?.tag).toBe("v1.2.0");
+  expect(release?.author).toBe("octocat");
   expect(body).toBe("Notes here #1");
 });
 
@@ -64,21 +65,22 @@ test("parseReleaseFromContext falls back to a tag push ref", () => {
     payload: { ref: "refs/tags/v9.9.9" },
     actor: "octocat",
   });
-  expect(release.tag).toBe("v9.9.9");
+  expect(release?.tag).toBe("v9.9.9");
 });
 
 test("buildAuditPayload shapes the premium request", () => {
-  const payload = buildAuditPayload(
-    {
-      tag: "v1.0.0",
-      name: "GA",
-      isPrerelease: false,
-      isDraft: false,
-      publishedAt: null,
-      author: "a",
-    },
-    { owner: "acme", repo: "widgets" }
-  );
+  const release: Release = {
+    tag: "v1.0.0",
+    name: "GA",
+    body: "",
+    isPrerelease: false,
+    isDraft: false,
+    publishedAt: null,
+    author: "a",
+    url: null,
+  };
+  const repo: Repo = { owner: "acme", repo: "widgets" };
+  const payload = buildAuditPayload(release, repo);
   expect(payload.repository).toBe("acme/widgets");
   expect(payload.release.tag).toBe("v1.0.0");
   expect(payload.requested.isoControlMapping).toBe(true);

@@ -5,7 +5,7 @@
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
-    "build": "bun build src/index.js --outfile dist/index.js --target node",
+    "build": "bun build src/index.ts --outfile dist/index.js --target node",
     "test": "bun test",
     "lint": "echo \"(placeholder) add eslint here\" && exit 0"
   },
