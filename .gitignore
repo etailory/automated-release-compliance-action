@@ -1,0 +1,5 @@
+node_modules/
+*.log
+.DS_Store
+coverage/
+# dist/ is intentionally committed so the action runs without a build step.

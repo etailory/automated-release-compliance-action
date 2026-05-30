@@ -8,7 +8,7 @@ Instead of forcing teams to manage fragmented tools that don't talk to each othe
 
 ---
 
-## 🧭 The Vision: Bridging the Enterprise Divide
+## The Vision: Bridging the Enterprise Divide
 
 Modern software delivery in regulated enterprises suffers from extreme friction between three distinct layers. Governor OS eliminates this by providing an interconnected platform:
 
@@ -23,10 +23,74 @@ The ultimate enterprise value. Instead of taking weeks to gather screenshots and
 
 ---
 
-## 🛠️ Repository Architecture (Monorepo)
+## Repository Architecture (Monorepo)
 
 To ensure the AI engine has complete, uninterrupted context over the entire platform, Governor OS is developed as a Monorepo:
 
 *   `/action`: The lightweight GitHub Action ("Trojan Horse") used for friction-free developer onboarding.
 *   `/web`: The unified web application (Next.js/Node.js) hosting the Roadmap, Sprint, and QA interfaces.
 *   `/core`: Shared data structures, compliance definitions, and AI prompt pipelines.
+
+---
+
+## Usage
+
+```yaml
+name: Release Compliance
+on:
+  release:
+    types: [published]
+
+jobs:
+  compliance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: markgrendev/automated-release-compliance-action/action@main
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          # anthropic-federation-rule-id: ${{ secrets.FEDERATION_RULE_ID }}
+          # anthropic-organization-id: ${{ secrets.ORG_ID }}
+          # anthropic-service-account-id: ${{ secrets.SERVICE_ACCOUNT_ID }}
+```
+
+## Development
+
+The `src/` library and tests are written in **TypeScript**. Bun handles transpilation natively — no separate compile step is needed during development.
+
+```bash
+bun install          # install root dependencies
+bun test             # run TypeScript unit tests via bun:test
+bun run build        # bundle src/index.ts -> dist/index.js (node target)
+
+cd action && npm install   # install action-specific dependencies
+cd web && npm install      # install web server dependencies
+```
+
+### TypeScript
+
+- Source: `src/*.ts` — strict TypeScript with shared interfaces in `src/types.ts`
+- Tests: `test/*.test.ts` — `bun:test` with typed assertions
+- Config: `tsconfig.json` — `moduleResolution: bundler`, `strict: true`
+- Build: Bun bundles the TypeScript entry point directly; no intermediate `.js` output in `src/`
+
+## Project layout
+
+```
+action/             GitHub Action implementation (node20, OIDC-based)
+  action.yml        Action metadata + input/output contract
+  index.js          Entry point: free-tier + premium OIDC compliance
+  package.json      Action dependencies (@actions/core, @actions/github)
+web/                Express API server for premium audit trail generation
+  server.js         REST API: /api/v1/compliance/verify + /audit
+  package.json      Web server dependencies (express)
+src/                TypeScript compliance checklist library (Bun)
+  types.ts          Shared TypeScript interfaces
+  checklist.ts      Free-tier compliance rules
+  index.ts          Action entry point
+  premium.ts        Premium bridge stub
+dist/               Bundled output built via bun build
+test/               Unit tests (bun:test, TypeScript)
+tsconfig.json       TypeScript compiler configuration
+action.yml          Root action metadata (points to dist/index.js)
+LICENSE             MIT License
+```
