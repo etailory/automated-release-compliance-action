@@ -34,7 +34,8 @@ jobs:
         uses: anthropics/claude-code-action@main
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # github_token måste skickas med här så action-scriptet kan prata med ditt repo
+          github_token: ${{ secrets.GITHUB_TOKEN }} 
           claude_args: |
-            --allowedTools "Bash(bun install),Bash(bun test:*),Bash(bun run format),Bash(bun typecheck)"
-            --model: 'claude-sonnet-4-6'
-          
+            --allowedTools "Bash(git *),Bash(bun install),Bash(bun test:*),Bash(bun run format),Bash(bun typecheck)"
+            --model claude-sonnet-4-6
