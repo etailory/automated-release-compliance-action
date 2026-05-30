@@ -23,6 +23,7 @@ jobs:
       pull-requests: write
       issues: write
       id-token: write
+      actions: read
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -34,8 +35,6 @@ jobs:
         uses: anthropics/claude-code-action@main
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          # github_token måste skickas med här så action-scriptet kan prata med ditt repo
-          github_token: ${{ secrets.GITHUB_TOKEN }} 
           claude_args: |
-            --allowedTools "Bash(git *),Bash(bun install),Bash(bun run build),Bash(bun test),Bash(bun run format),Bash(bun typecheck)"
+            --allowedTools "Bash(bun install),Bash(bun run build),Bash(bun test),Bash(bun run format),Bash(bun typecheck)"
             --model claude-sonnet-4-6
