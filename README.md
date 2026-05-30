@@ -1,13 +1,37 @@
-# Automated Release Compliance Governor
+# Governor OS (ComplianceSuite)
 
-A lightweight GitHub Action that checks every published release against a basic
-compliance checklist — and prepares the bridge to premium, AI-driven ISO 27001 /
-SOC 2 / DORA auditing.
+> The Unified Product, Engineering, and Quality Management Platform for Regulated Industries.
 
-- **Free tier** (no license key): runs a fully local checklist on the release
-  notes and logs a summary to the job console + the GitHub job summary.
-- **Premium tier** (with `license-key`): prepares a secure bridge to the hosted
-  audit backend. *(Transmission is stubbed in this MVP — no data leaves the runner yet.)*
+Governor OS is an all-in-one platform built specifically for companies operating under strict regulatory frameworks (Fintech, MedTech, GovTech) bound by **ISO 27001, SOC2, and DORA compliance**. 
+
+Instead of forcing teams to manage fragmented tools that don't talk to each other, Governor OS unifies the entire software lifecycle—from corporate strategy to source code and test execution—into a single, AI-driven source of truth.
+
+---
+
+## The Vision: Bridging the Enterprise Divide
+
+Modern software delivery in regulated enterprises suffers from extreme friction between three distinct layers. Governor OS eliminates this by providing an interconnected platform:
+
+*   **Portfolio & Roadmap View (For Leadership & Product):** Executives map high-level strategic milestones. Our integrated AI instantly cross-references these goals against global compliance standards (e.g., ISO, DORA), automatically flagging compliance controls and risk assessments before a single line of code is written.
+*   **Sprint & Issue Tracking (For Engineering):** An intuitive agile backlog directly linked to the roadmap. As engineers code, the system dynamically feeds relevant compliance guidelines into their workflow. No manual ticketing or synchronization required.
+*   **Integrated QA & Test Management (Replacing TestRail):** When a feature is defined, the AI generates the required technical test protocols instantly. Test execution results are captured natively within our pipelines and permanently linked to the respective strategic goal and compliance control.
+
+### The One-Click Audit
+The ultimate enterprise value. Instead of taking weeks to gather screenshots and logs for external auditors, compliance officers can generate a cryptographic, end-to-end audit trail in seconds:
+
+`Strategic Intent ──> Risk Assessment ──> Code Commits ──> QA Verification ──> Production Release`
+
+---
+
+## Repository Architecture (Monorepo)
+
+To ensure the AI engine has complete, uninterrupted context over the entire platform, Governor OS is developed as a Monorepo:
+
+*   `/action`: The lightweight GitHub Action ("Trojan Horse") used for friction-free developer onboarding.
+*   `/web`: The unified web application (Next.js/Node.js) hosting the Roadmap, Sprint, and QA interfaces.
+*   `/core`: Shared data structures, compliance definitions, and AI prompt pipelines.
+
+---
 
 ## Usage
 
@@ -21,59 +45,41 @@ jobs:
   compliance:
     runs-on: ubuntu-latest
     steps:
-      - uses: markgrendev/automated-release-compliance-action@v0
+      - uses: markgrendev/automated-release-compliance-action/action@main
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          # license-key: ${{ secrets.COMPLIANCE_LICENSE_KEY }}  # enables premium tier
-          # fail-on-incomplete: "true"                          # hard-gate the release
-```
-
-## Inputs
-
-| Input                | Required | Default          | Description                                                                 |
-| -------------------- | -------- | ---------------- | --------------------------------------------------------------------------- |
-| `github-token`       | yes      | `${{ github.token }}` | Token used to read release/repo context.                               |
-| `license-key`        | no       | `""`             | Premium license key. When set, prepares the hosted-backend audit bridge.    |
-| `fail-on-incomplete` | no       | `"false"`        | When `"true"`, fails the workflow if the free-tier checklist does not pass. |
-
-## Outputs
-
-| Output   | Description                                            |
-| -------- | ------------------------------------------------------ |
-| `passed` | `"true"` if all checklist items passed.                |
-| `score`  | Passed-over-total, e.g. `"2/3"`.                       |
-| `tier`   | Which tier ran: `"free"` or `"premium"`.               |
-
-## Free-tier checklist
-
-1. Release notes contain a description of the changes.
-2. Release notes link to an issue, pull request, or ticket.
-3. Release notes are not an empty/placeholder body.
-
-## Project layout
-
-```
-action.yml          Action metadata + input/output contract
-src/index.js        Entry point: parses the release event, routes free vs premium
-src/checklist.js    Free-tier, fully-local compliance rules
-src/premium.js      Premium bridge stub (payload shaping; no transmission yet)
-dist/index.js       Bundled output that the action actually runs (built via ncc)
-test/               Unit tests (run with `npm test`)
+          # anthropic-federation-rule-id: ${{ secrets.FEDERATION_RULE_ID }}
+          # anthropic-organization-id: ${{ secrets.ORG_ID }}
+          # anthropic-service-account-id: ${{ secrets.SERVICE_ACCOUNT_ID }}
 ```
 
 ## Development
 
 ```bash
-npm install      # install @actions/core, @actions/github, ncc
-npm test         # run the unit tests
-npm run build    # bundle src/ -> dist/ (commit dist/ so the action runs without install)
+bun install          # install root dependencies
+bun test             # run checklist unit tests
+bun run build        # bundle src/ -> dist/index.js
+
+cd action && npm install   # install action-specific dependencies
+cd web && npm install      # install web server dependencies
 ```
 
-> **Note:** `dist/index.js` must be built and committed for the action to run on
-> the marketplace. Run `npm run build` after changing anything under `src/`.
+## Project layout
 
-## Roadmap
-
-The premium backend will perform AI-driven ISO control mapping over the commits
-and PRs in a release, generate signed PDF evidence reports, and optionally block
-releases on critical compliance risk.
+```
+action/             GitHub Action implementation (node20, OIDC-based)
+  action.yml        Action metadata + input/output contract
+  index.js          Entry point: free-tier + premium OIDC compliance
+  package.json      Action dependencies (@actions/core, @actions/github)
+web/                Express API server for premium audit trail generation
+  server.js         REST API: /api/v1/compliance/verify + /audit
+  package.json      Web server dependencies (express)
+src/                Bun-native compliance checklist library
+  checklist.js      Free-tier compliance rules (ESM)
+  index.js          Action entry point (Bun ESM)
+  premium.js        Premium bridge stub (Bun ESM)
+dist/               Bundled output built via bun build
+test/               Unit tests (bun:test)
+action.yml          Root action metadata (points to dist/index.js)
+LICENSE             MIT License
+```
