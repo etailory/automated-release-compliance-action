@@ -1,0 +1,35 @@
+name: "Automated Release Compliance Governor"
+description: "Scan published GitHub releases against a compliance checklist. Free tier runs locally; premium tier bridges to a hosted AI audit backend."
+author: "markgrendev"
+
+branding:
+  icon: "shield"
+  color: "blue"
+
+inputs:
+  github-token:
+    description: "GitHub token used to read release and repository context (typically secrets.GITHUB_TOKEN)."
+    required: true
+    default: ${{ github.token }}
+
+  license-key:
+    description: "Optional premium license key. When provided, the action prepares the secure bridge to the hosted AI compliance audit backend. When omitted, only the free local checklist runs."
+    required: false
+    default: ""
+
+  fail-on-incomplete:
+    description: "If 'true', the action fails the workflow when the free-tier checklist does not pass. Defaults to 'false' (warn-only)."
+    required: false
+    default: "false"
+
+outputs:
+  passed:
+    description: "'true' if the release satisfied the basic compliance checklist, otherwise 'false'."
+  score:
+    description: "Number of checklist items passed out of the total."
+  tier:
+    description: "Which tier ran: 'free' or 'premium'."
+
+runs:
+  using: "node20"
+  main: "dist/index.js"
