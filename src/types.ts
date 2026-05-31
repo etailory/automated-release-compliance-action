@@ -64,12 +64,14 @@ export interface AuditPayload {
 export interface DispatchResult {
   status: string;
   queued: boolean;
+  jobId?: string;
 }
 
 export interface PremiumAuditResult {
   prepared: boolean;
   endpoint: string;
   payload: AuditPayload;
+  jobId?: string;
 }
 
 export interface ActionContext {

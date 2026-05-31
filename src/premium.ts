@@ -1,14 +1,12 @@
 /**
- * Premium-tier bridge (STUB).
+ * Premium-tier bridge.
  *
  * In the free tier this module is never invoked. When a `license-key` input is
- * supplied, `runPremiumAudit` is called as a placeholder for the future hosted
- * backend that will perform AI-driven ISO/SOC2/DORA auditing, evidence
- * generation, and hard governance blocking.
+ * supplied, `runPremiumAudit` dispatches an authenticated HTTPS POST to the
+ * Governor OS backend, which enqueues an AI-driven ISO/SOC2/DORA audit job.
  *
- * IMPORTANT: This stub deliberately does NOT send any data off the runner yet.
- * Replace `dispatchToBackend` with a real authenticated HTTPS call when the
- * SaaS endpoint is live.
+ * Set COMPLIANCE_BACKEND_URL to enable real dispatch. Without it, the bridge
+ * logs a warning and skips transmission so free-tier CI runs are unaffected.
  */
 
 import type {
@@ -20,12 +18,22 @@ import type {
   PremiumAuditResult,
 } from "./types.js";
 
-/** Where the hosted audit backend will eventually live. */
+const AUDIT_PATH = "/api/v1/compliance/audit";
+const DEFAULT_TIMEOUT_MS = 10_000;
+
+/** Returns the full audit endpoint URL, or null if COMPLIANCE_BACKEND_URL is unset. */
+export function getAuditEndpoint(): string | null {
+  const base = process.env.COMPLIANCE_BACKEND_URL?.replace(/\/$/, "");
+  return base ? `${base}${AUDIT_PATH}` : null;
+}
+
+/** Exported for backward compatibility and logging. */
 export const BACKEND_ENDPOINT: string =
-  process.env.COMPLIANCE_BACKEND_URL || "https://api.example-compliance.dev/v1/audits";
+  (process.env.COMPLIANCE_BACKEND_URL?.replace(/\/$/, "") ??
+    "https://api.example-compliance.dev") + AUDIT_PATH;
 
 /**
- * Build the (future) request payload from the release context.
+ * Build the request payload from the release context.
  */
 export function buildAuditPayload(release: Release, repo: Repo): AuditPayload {
   return {
@@ -48,18 +56,62 @@ export function buildAuditPayload(release: Release, repo: Repo): AuditPayload {
 }
 
 /**
- * Placeholder dispatch — intentionally a no-op for the MVP.
+ * Dispatch an audit payload to the backend.
+ *
+ * Returns `{ status: "stubbed", queued: false }` when COMPLIANCE_BACKEND_URL
+ * is not set. On HTTP 202 returns the jobId from the backend. On any other
+ * HTTP status throws a descriptive error so the caller can surface it.
  */
 export async function dispatchToBackend(
-  _licenseKey: string,
-  _payload: AuditPayload
+  licenseKey: string,
+  payload: AuditPayload
 ): Promise<DispatchResult> {
-  // TODO: replace with an authenticated fetch() to BACKEND_ENDPOINT.
-  return { status: "stubbed", queued: false };
+  const base = process.env.COMPLIANCE_BACKEND_URL?.replace(/\/$/, "");
+  if (!base) {
+    return { status: "stubbed", queued: false };
+  }
+
+  const endpoint = `${base}${AUDIT_PATH}`;
+  const timeoutMs = Number(
+    process.env.COMPLIANCE_REQUEST_TIMEOUT_MS ?? DEFAULT_TIMEOUT_MS
+  );
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${licenseKey}`,
+      },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+
+    if (response.status === 202) {
+      const data = (await response.json()) as { jobId?: string };
+      return { status: "queued", queued: true, jobId: data.jobId };
+    }
+
+    let detail: string;
+    try {
+      detail = await response.text();
+    } catch {
+      detail = "(unreadable response body)";
+    }
+    throw new Error(
+      `Compliance backend returned HTTP ${response.status}: ${detail}`
+    );
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**
- * Premium entry point. Prepares the secure bridge; does not yet transmit data.
+ * Premium entry point. Builds the audit payload and dispatches it to the
+ * backend. Logs the jobId so it appears in the Action summary.
  */
 export async function runPremiumAudit({
   licenseKey,
@@ -76,16 +128,31 @@ export async function runPremiumAudit({
     throw new Error("runPremiumAudit called without a license key");
   }
 
-  logger.info("Premium tier detected — preparing secure compliance bridge.");
+  const endpoint = getAuditEndpoint();
+  logger.info("Premium tier detected — initiating compliance audit.");
   const payload = buildAuditPayload(release, repo);
-
   logger.debug(`Prepared audit payload for ${payload.repository}@${release.tag}`);
-  logger.info(
-    `Bridge target: ${BACKEND_ENDPOINT} (transmission is stubbed in the MVP — no data leaves the runner yet).`
-  );
 
+  if (!endpoint) {
+    logger.warning(
+      "COMPLIANCE_BACKEND_URL is not set — premium audit skipped. " +
+        "Set this variable to enable backend auditing."
+    );
+    return {
+      prepared: true,
+      endpoint:
+        "https://api.example-compliance.dev" + AUDIT_PATH,
+      payload,
+    };
+  }
+
+  logger.info(`Dispatching audit to ${endpoint}`);
   const result = await dispatchToBackend(licenseKey, payload);
   logger.info(`Backend dispatch result: ${result.status}.`);
 
-  return { prepared: true, endpoint: BACKEND_ENDPOINT, payload };
+  if (result.jobId) {
+    logger.info(`Compliance audit job queued: jobId=${result.jobId}`);
+  }
+
+  return { prepared: true, endpoint, payload, jobId: result.jobId };
 }

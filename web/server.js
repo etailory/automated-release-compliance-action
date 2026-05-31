@@ -87,53 +87,105 @@ app.post('/api/v1/compliance/verify', async (req, res) => {
 // ---------------------------------------------------------------------------
 // POST /api/v1/compliance/audit
 //
-// Receives repository metadata and release context from the GitHub Action
-// and enqueues an automated compliance audit trail generation job.
+// Receives an AuditPayload from the GitHub Action (premium tier) and enqueues
+// an automated compliance audit trail generation job.
 //
-// Expected request body:
+// Authentication: Authorization: Bearer <license-key>
+//
+// Expected request body (AuditPayload):
 // {
-//   "oidcToken":       string,         // Short-lived OIDC JWT (for stateless auth)
-//   "organizationId":  string,
-//   "serviceAccountId": string,
+//   "schemaVersion": string,
+//   "repository":    string,          // "owner/repo"
 //   "release": {
-//     "tagName":      string,
-//     "name":         string,
-//     "body":         string,          // Release notes content
-//     "owner":        string,
-//     "repository":   string,
-//     "publishedAt":  string (ISO 8601)
+//     "tag":         string,
+//     "name":        string,
+//     "isPrerelease": boolean,
+//     "isDraft":      boolean,
+//     "publishedAt":  string | null,
+//     "author":       string | null
+//   },
+//   "requested": {
+//     "isoControlMapping": boolean,
+//     "evidencePdf":       boolean,
+//     "governanceVerdict": boolean
 //   }
 // }
 // ---------------------------------------------------------------------------
 
 app.post('/api/v1/compliance/audit', async (req, res) => {
   try {
-    const { oidcToken, organizationId, release } = req.body ?? {};
+    // Extract Bearer token from Authorization header
+    const authHeader = req.headers['authorization'] ?? '';
+    const licenseKey = authHeader.startsWith('Bearer ')
+      ? authHeader.slice('Bearer '.length).trim()
+      : '';
 
-    // Input validation
-    if (!oidcToken || !organizationId || !release?.tagName) {
-      return res.status(400).json({
+    if (!licenseKey) {
+      return res.status(401).json({
         success: false,
-        error:   'Missing required fields: oidcToken, organizationId, release.tagName',
+        error:   'Missing or invalid Authorization header. Expected: Bearer <license-key>',
       });
     }
 
-    // TODO: authenticate the request using the session token issued by /verify
-    //       (or verify the oidcToken directly for stateless requests)
-    // TODO: persist release metadata to the Governor OS database
-    // TODO: enqueue an AI audit generation job (e.g. via a task queue or serverless function)
-    const auditJob = await enqueueAuditJob({ organizationId, release });
+    const { schemaVersion, repository, release } = req.body ?? {};
+
+    // Input validation
+    if (!schemaVersion || !repository || !release?.tag) {
+      return res.status(400).json({
+        success: false,
+        error:   'Missing required fields: schemaVersion, repository, release.tag',
+      });
+    }
+
+    // TODO: validate license key against the Governor OS database
+    // TODO: persist audit request to the Governor OS database
+    // TODO: enqueue an AI audit generation job (e.g. via BullMQ, SQS, Cloud Tasks)
+    const auditJob = await enqueueAuditJob({ licenseKey, repository, release });
 
     return res.status(202).json({
-      success:  true,
-      jobId:    auditJob.jobId,
-      status:   'queued',
-      message:  `Compliance audit job queued for release ${release.tagName}. Check status at /api/v1/compliance/audit/${auditJob.jobId}`,
+      success: true,
+      jobId:   auditJob.jobId,
+      status:  'queued',
+      message: `Compliance audit job queued for ${repository}@${release.tag}. Poll GET /api/v1/compliance/audit/${auditJob.jobId} for status.`,
     });
 
   } catch (error) {
     console.error('[/api/v1/compliance/audit] Error:', error);
     return res.status(500).json({ success: false, error: 'Internal server error during audit submission.' });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/compliance/audit/:jobId
+//
+// Returns the current status of a compliance audit job. The GitHub Action
+// polls this endpoint after submitting via POST until the job leaves the
+// "queued" state.
+//
+// Response: { success, jobId, status: "queued" | "running" | "complete" | "failed" }
+// ---------------------------------------------------------------------------
+
+app.get('/api/v1/compliance/audit/:jobId', async (req, res) => {
+  try {
+    const { jobId } = req.params;
+
+    if (!jobId) {
+      return res.status(400).json({ success: false, error: 'Missing jobId parameter' });
+    }
+
+    // TODO: look up the real job status from the Governor OS database / queue
+    const jobStatus = await getAuditJobStatus(jobId);
+
+    return res.status(200).json({
+      success: true,
+      jobId,
+      status:  jobStatus.status,
+      message: jobStatus.message,
+    });
+
+  } catch (error) {
+    console.error('[GET /api/v1/compliance/audit/:jobId] Error:', error);
+    return res.status(500).json({ success: false, error: 'Internal server error fetching job status.' });
   }
 });
 
@@ -160,15 +212,26 @@ async function verifyOidcAndLicense({ oidcToken, organizationId, federationRuleI
 
 /**
  * Placeholder: persists release metadata and enqueues an AI-driven audit
- * trail generation job for the given organization and release.
+ * trail generation job for the given repository and release.
  */
-async function enqueueAuditJob({ organizationId, release }) {
+async function enqueueAuditJob({ licenseKey, repository, release }) {
   // TODO: insert audit job record into the Governor OS database
   // TODO: publish a job message to the audit queue (e.g. BullMQ, SQS, Cloud Tasks)
-  const jobId = `audit-${organizationId}-${release.tagName}-${Date.now()}`;
-  console.log(`[enqueueAuditJob] Queued job: ${jobId}`);
+  const safeRepo = repository.replace(/[^a-zA-Z0-9-]/g, '_');
+  const jobId = `audit-${safeRepo}-${release.tag}-${Date.now()}`;
+  console.log(`[enqueueAuditJob] Queued job: ${jobId} (license prefix: ${licenseKey.slice(0, 8)}...)`);
 
   return { jobId };
+}
+
+/**
+ * Placeholder: fetches the current status of an audit job.
+ */
+async function getAuditJobStatus(jobId) {
+  // TODO: query job status from the Governor OS database / task queue
+  console.log(`[getAuditJobStatus] Checking status for: ${jobId}`);
+
+  return { status: 'queued', message: 'Audit job is queued and awaiting processing.' };
 }
 
 // ---------------------------------------------------------------------------

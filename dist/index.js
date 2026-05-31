@@ -12477,7 +12477,7 @@ var require_fetch = __commonJS((exports, module) => {
       this.emit("terminated", error);
     }
   }
-  function fetch(input, init = {}) {
+  function fetch2(input, init = {}) {
     webidl.argumentLengthCheck(arguments, 1, { header: "globalThis.fetch" });
     const p = createDeferredPromise();
     let requestObject;
@@ -13334,7 +13334,7 @@ var require_fetch = __commonJS((exports, module) => {
     }
   }
   module.exports = {
-    fetch,
+    fetch: fetch2,
     Fetch,
     fetching,
     finalizeAndReportTiming
@@ -16374,7 +16374,7 @@ var require_undici = __commonJS((exports, module) => {
   exports.getGlobalDispatcher = getGlobalDispatcher;
   if (util.nodeMajor > 16 || util.nodeMajor === 16 && util.nodeMinor >= 8) {
     let fetchImpl = null;
-    exports.fetch = async function fetch(resource) {
+    exports.fetch = async function fetch2(resource) {
       if (!fetchImpl) {
         fetchImpl = require_fetch().fetch;
       }
@@ -19627,14 +19627,14 @@ var require_dist_node5 = __commonJS((exports, module) => {
     let headers = {};
     let status;
     let url;
-    let { fetch } = globalThis;
+    let { fetch: fetch2 } = globalThis;
     if ((_b = requestOptions.request) == null ? undefined : _b.fetch) {
-      fetch = requestOptions.request.fetch;
+      fetch2 = requestOptions.request.fetch;
     }
-    if (!fetch) {
+    if (!fetch2) {
       throw new Error("fetch is not set. Please pass a fetch implementation as new Octokit({ request: { fetch }}). Learn more at https://github.com/octokit/octokit.js/#fetch-missing");
     }
-    return fetch(requestOptions.url, {
+    return fetch2(requestOptions.url, {
       method: requestOptions.method,
       body: requestOptions.body,
       redirect: (_c = requestOptions.request) == null ? undefined : _c.redirect,
@@ -22835,7 +22835,13 @@ function evaluateChecklist(body = "", ctx = {}, rules = DEFAULT_RULES) {
 }
 
 // src/premium.ts
-var BACKEND_ENDPOINT = process.env.COMPLIANCE_BACKEND_URL || "https://api.example-compliance.dev/v1/audits";
+var AUDIT_PATH = "/api/v1/compliance/audit";
+var DEFAULT_TIMEOUT_MS = 1e4;
+function getAuditEndpoint() {
+  const base = process.env.COMPLIANCE_BACKEND_URL?.replace(/\/$/, "");
+  return base ? `${base}${AUDIT_PATH}` : null;
+}
+var BACKEND_ENDPOINT = (process.env.COMPLIANCE_BACKEND_URL?.replace(/\/$/, "") ?? "https://api.example-compliance.dev") + AUDIT_PATH;
 function buildAuditPayload(release, repo) {
   return {
     schemaVersion: "1.0",
@@ -22855,8 +22861,39 @@ function buildAuditPayload(release, repo) {
     }
   };
 }
-async function dispatchToBackend(_licenseKey, _payload) {
-  return { status: "stubbed", queued: false };
+async function dispatchToBackend(licenseKey, payload) {
+  const base = process.env.COMPLIANCE_BACKEND_URL?.replace(/\/$/, "");
+  if (!base) {
+    return { status: "stubbed", queued: false };
+  }
+  const endpoint = `${base}${AUDIT_PATH}`;
+  const timeoutMs = Number(process.env.COMPLIANCE_REQUEST_TIMEOUT_MS ?? DEFAULT_TIMEOUT_MS);
+  const controller = new AbortController;
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${licenseKey}`
+      },
+      body: JSON.stringify(payload),
+      signal: controller.signal
+    });
+    if (response.status === 202) {
+      const data = await response.json();
+      return { status: "queued", queued: true, jobId: data.jobId };
+    }
+    let detail;
+    try {
+      detail = await response.text();
+    } catch {
+      detail = "(unreadable response body)";
+    }
+    throw new Error(`Compliance backend returned HTTP ${response.status}: ${detail}`);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 async function runPremiumAudit({
   licenseKey,
@@ -22867,13 +22904,25 @@ async function runPremiumAudit({
   if (!licenseKey) {
     throw new Error("runPremiumAudit called without a license key");
   }
-  logger.info("Premium tier detected — preparing secure compliance bridge.");
+  const endpoint = getAuditEndpoint();
+  logger.info("Premium tier detected — initiating compliance audit.");
   const payload = buildAuditPayload(release, repo);
   logger.debug(`Prepared audit payload for ${payload.repository}@${release.tag}`);
-  logger.info(`Bridge target: ${BACKEND_ENDPOINT} (transmission is stubbed in the MVP — no data leaves the runner yet).`);
+  if (!endpoint) {
+    logger.warning("COMPLIANCE_BACKEND_URL is not set — premium audit skipped. " + "Set this variable to enable backend auditing.");
+    return {
+      prepared: true,
+      endpoint: "https://api.example-compliance.dev" + AUDIT_PATH,
+      payload
+    };
+  }
+  logger.info(`Dispatching audit to ${endpoint}`);
   const result = await dispatchToBackend(licenseKey, payload);
   logger.info(`Backend dispatch result: ${result.status}.`);
-  return { prepared: true, endpoint: BACKEND_ENDPOINT, payload };
+  if (result.jobId) {
+    logger.info(`Compliance audit job queued: jobId=${result.jobId}`);
+  }
+  return { prepared: true, endpoint, payload, jobId: result.jobId };
 }
 
 // src/report.ts
