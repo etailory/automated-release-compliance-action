@@ -109,6 +109,7 @@ docker compose up -d
 # Verify: curl http://localhost:3000/health
 # → {"status":"ok","service":"governor-os-web","version":"1.0.0"}
 # OpenAPI spec: curl http://localhost:3000/openapi.yaml
+# API docs: http://localhost:3000/docs
 ```
 
 The `docker-compose.yml` at the repo root builds the `web/` image, mounts a

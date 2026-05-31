@@ -23,6 +23,7 @@ info:
     name: Governor OS Support
   license:
     name: MIT
+    url: https://opensource.org/licenses/MIT
 
 servers:
   - url: http://localhost:3000
@@ -239,6 +240,7 @@ paths:
       summary: Server health check
       description: Returns `200 OK` with service metadata when the server is healthy.
       operationId: getHealth
+      security: []
       responses:
         "200":
           description: Server is healthy
@@ -265,6 +267,7 @@ paths:
       summary: OpenAPI specification
       description: Returns this OpenAPI 3.0 specification document as `text/yaml`.
       operationId: getOpenApiSpec
+      security: []
       responses:
         "200":
           description: OpenAPI spec document
@@ -291,6 +294,7 @@ paths:
 
         **Rate limit:** 10 requests per 5 minutes per IP.
       operationId: verifyOidc
+      security: []
       requestBody:
         required: true
         content:
@@ -508,6 +512,7 @@ paths:
         `410 Gone`. Jobs from prior server process runs are read from the durable
         NDJSON audit log file.
       operationId: getAuditJob
+      security: []
       parameters:
         - name: jobId
           in: path

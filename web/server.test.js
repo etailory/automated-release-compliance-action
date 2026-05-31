@@ -220,6 +220,21 @@ describe('GET /openapi.yaml', () => {
 });
 
 // ---------------------------------------------------------------------------
+// GET /docs
+// ---------------------------------------------------------------------------
+
+describe('GET /docs', () => {
+  test('returns 200 with text/html content-type', async () => {
+    const res = await fetch(`${baseUrl}/docs`);
+    assert.equal(res.status, 200);
+    assert.ok(res.headers.get('content-type')?.startsWith('text/html'), 'content-type must be text/html');
+    const text = await res.text();
+    assert.ok(text.includes('<redoc'), 'response must include Redoc element');
+    assert.ok(text.includes('/openapi.yaml'), 'Redoc must reference the OpenAPI spec');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // POST /api/v1/compliance/audit — authentication
 // ---------------------------------------------------------------------------
 

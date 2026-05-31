@@ -739,6 +739,27 @@ app.get('/openapi.yaml', async (_req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// GET /docs — Redoc HTML API documentation viewer
+// ---------------------------------------------------------------------------
+
+app.get('/docs', (_req, res) => {
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.send(`<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <title>Governor OS API Reference</title>
+    <meta charset="utf-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>body { margin: 0; padding: 0; }</style>
+  </head>
+  <body>
+    <redoc spec-url='/openapi.yaml'></redoc>
+    <script src="https://cdn.jsdelivr.net/npm/redoc@latest/bundles/redoc.standalone.js"></script>
+  </body>
+</html>`);
+});
+
+// ---------------------------------------------------------------------------
 // 404 fallback
 // ---------------------------------------------------------------------------
 
