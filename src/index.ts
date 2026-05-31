@@ -8,7 +8,7 @@ import { fetchReleaseCommits } from "./commits.js";
 import { parseReleaseFromContext } from "./context.js";
 import { evaluateChecklist, getRulesForProfile } from "./checklist.js";
 import { runPremiumAudit } from "./premium.js";
-import { buildComplianceReport, serializeReport } from "./report.js";
+import { buildComplianceReport, computeReportHash, serializeReport } from "./report.js";
 import { buildJobSummary } from "./summary.js";
 import type { ActionContext, CommitMetadata, Release, Repo, EvaluateResult, ComplianceProfile, Logger } from "./types.js";
 
@@ -22,7 +22,8 @@ async function reportFreeTier(
   profile: ComplianceProfile,
   tier: "free" | "premium",
   generatedAt: string,
-  reportPath?: string
+  reportPath?: string,
+  integrityHash?: string
 ): Promise<void> {
   core.info("─".repeat(60));
   core.info(`Release compliance check — ${release.name} (${release.tag})`);
@@ -36,7 +37,7 @@ async function reportFreeTier(
 
   try {
     await buildJobSummary(
-      { repo, release, evaluation, profile, tier, generatedAt, reportPath },
+      { repo, release, evaluation, profile, tier, generatedAt, reportPath, integrityHash },
       core.summary
     );
   } catch (err) {
@@ -49,9 +50,10 @@ const VALID_PROFILES: ComplianceProfile[] = ["default", "iso27001", "soc2", "dor
 
 /**
  * Write a durable, machine-readable compliance report to disk so it can be
- * archived as audit evidence (e.g. a CI artifact). Because the user explicitly
- * requested a report path, an I/O failure here is treated as a hard failure
- * rather than swallowed.
+ * archived as audit evidence (e.g. a CI artifact). Embeds a SHA-256 integrity
+ * hash before writing. Returns the hex hash so callers can surface it in the
+ * job summary. Because the user explicitly requested a report path, an I/O
+ * failure here is treated as a hard failure rather than swallowed.
  */
 function writeComplianceReport(
   reportPath: string,
@@ -59,18 +61,21 @@ function writeComplianceReport(
   repo: Repo,
   evaluation: EvaluateResult,
   tier: "free" | "premium",
+  generatedAt: string,
   commits?: CommitMetadata,
   profile: ComplianceProfile = "default"
-): void {
+): string {
   const report = buildComplianceReport({
     release,
     repo,
     evaluation,
     tier,
     profile,
-    generatedAt: new Date().toISOString(),
+    generatedAt,
     commits,
   });
+
+  report.integrityHash = computeReportHash(report);
 
   const dir = dirname(reportPath);
   if (dir && dir !== ".") {
@@ -80,6 +85,7 @@ function writeComplianceReport(
 
   core.info(`Wrote compliance report to ${reportPath}`);
   core.setOutput("report-path", reportPath);
+  return report.integrityHash;
 }
 
 export async function run(): Promise<void> {
@@ -112,24 +118,11 @@ export async function run(): Promise<void> {
     const tier = licenseKey ? "premium" : "free";
     const rules = getRulesForProfile(profile);
     const evaluation = evaluateChecklist(body, { release }, rules);
-    await reportFreeTier(
-      repo,
-      release,
-      evaluation,
-      profile,
-      tier,
-      new Date().toISOString(),
-      reportPath || undefined
-    );
-
-    core.setOutput("passed", String(evaluation.passed));
-    core.setOutput("score", `${evaluation.score}/${evaluation.total}`);
-    core.setOutput("profile", profile);
-
-    // --- Premium gate: only when a license key is present. --------------------
-    core.setOutput("tier", tier);
+    const generatedAt = new Date().toISOString();
 
     // --- Commit metadata enrichment: best-effort, release events only. --------
+    // Fetched before the summary so the hash (which covers commits) matches the
+    // report file and can be shown in the job summary.
     let commits: CommitMetadata | undefined;
     if (context.payload.release) {
       const octokit = github.getOctokit(token);
@@ -146,10 +139,31 @@ export async function run(): Promise<void> {
       }
     }
 
-    // --- Audit evidence: optional durable JSON report. ------------------------
+    // --- Audit evidence: optional durable JSON report (includes integrity hash). --
+    let integrityHash: string | undefined;
     if (reportPath) {
-      writeComplianceReport(reportPath, release, repo, evaluation, tier, commits, profile);
+      integrityHash = writeComplianceReport(
+        reportPath, release, repo, evaluation, tier, generatedAt, commits, profile
+      );
     }
+
+    await reportFreeTier(
+      repo,
+      release,
+      evaluation,
+      profile,
+      tier,
+      generatedAt,
+      reportPath || undefined,
+      integrityHash
+    );
+
+    core.setOutput("passed", String(evaluation.passed));
+    core.setOutput("score", `${evaluation.score}/${evaluation.total}`);
+    core.setOutput("profile", profile);
+
+    // --- Premium gate: only when a license key is present. --------------------
+    core.setOutput("tier", tier);
 
     if (licenseKey) {
       const premiumResult = await runPremiumAudit({

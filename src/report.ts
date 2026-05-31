@@ -11,6 +11,8 @@
  * Side effects (writing the file) live in the action entry point.
  */
 
+import { createHash } from "node:crypto";
+
 import type {
   CommitMetadata,
   ComplianceProfile,
@@ -86,6 +88,31 @@ export function buildComplianceReport(params: {
   }
 
   return report;
+}
+
+/** Recursively sort object keys so JSON serialization is key-order-stable. */
+function canonicalize(value: unknown): unknown {
+  if (value === null || typeof value !== "object") return value;
+  if (Array.isArray(value)) return value.map(canonicalize);
+  const obj = value as Record<string, unknown>;
+  const sorted: Record<string, unknown> = {};
+  for (const key of Object.keys(obj).sort()) {
+    sorted[key] = canonicalize(obj[key]);
+  }
+  return sorted;
+}
+
+/**
+ * Compute a SHA-256 hex digest over the canonical (sorted-key) JSON of all
+ * report fields except `integrityHash` itself, so the hash is stable across
+ * re-serializations and schema-compatible additions.
+ */
+export function computeReportHash(report: ComplianceReport): string {
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const { integrityHash: _omit, ...rest } = report;
+  return createHash("sha256")
+    .update(JSON.stringify(canonicalize(rest)))
+    .digest("hex");
 }
 
 /**

@@ -1,8 +1,10 @@
 import { test, expect } from "bun:test";
+import { createHash } from "node:crypto";
 
 import { evaluateChecklist } from "../src/checklist.js";
 import {
   buildComplianceReport,
+  computeReportHash,
   serializeReport,
   REPORT_SCHEMA_VERSION,
   TOOL_NAME,
@@ -133,4 +135,104 @@ test("buildComplianceReport omits commits block when not provided", () => {
   });
 
   expect(report.commits).toBeUndefined();
+});
+
+test("computeReportHash returns a 64-char hex string", () => {
+  const evaluation = evaluateChecklist(RELEASE.body);
+  const report = buildComplianceReport({
+    release: RELEASE,
+    repo: REPO,
+    evaluation,
+    tier: "free",
+    profile: "default",
+    generatedAt: AT,
+  });
+
+  const hash = computeReportHash(report);
+  expect(hash).toMatch(/^[0-9a-f]{64}$/);
+});
+
+test("computeReportHash is deterministic for identical reports", () => {
+  const evaluation = evaluateChecklist(RELEASE.body);
+  const report = buildComplianceReport({
+    release: RELEASE,
+    repo: REPO,
+    evaluation,
+    tier: "free",
+    profile: "default",
+    generatedAt: AT,
+  });
+
+  expect(computeReportHash(report)).toBe(computeReportHash(report));
+});
+
+test("computeReportHash excludes the integrityHash field itself", () => {
+  const evaluation = evaluateChecklist(RELEASE.body);
+  const report = buildComplianceReport({
+    release: RELEASE,
+    repo: REPO,
+    evaluation,
+    tier: "free",
+    profile: "default",
+    generatedAt: AT,
+  });
+
+  const hashBefore = computeReportHash(report);
+  // Embedding the hash must not change the hash (idempotent).
+  report.integrityHash = hashBefore;
+  expect(computeReportHash(report)).toBe(hashBefore);
+});
+
+test("computeReportHash changes when report content changes", () => {
+  const evaluation = evaluateChecklist(RELEASE.body);
+  const report = buildComplianceReport({
+    release: RELEASE,
+    repo: REPO,
+    evaluation,
+    tier: "free",
+    profile: "default",
+    generatedAt: AT,
+  });
+
+  const hash1 = computeReportHash(report);
+
+  const report2 = buildComplianceReport({
+    release: RELEASE,
+    repo: REPO,
+    evaluation,
+    tier: "premium",  // different tier
+    profile: "default",
+    generatedAt: AT,
+  });
+
+  expect(computeReportHash(report2)).not.toBe(hash1);
+});
+
+test("computeReportHash matches independently computed SHA-256", () => {
+  const evaluation = evaluateChecklist(RELEASE.body);
+  const report = buildComplianceReport({
+    release: RELEASE,
+    repo: REPO,
+    evaluation,
+    tier: "free",
+    profile: "iso27001",
+    generatedAt: AT,
+  });
+
+  const hash = computeReportHash(report);
+
+  // Re-compute the same canonical JSON independently
+  const { integrityHash: _omit, ...rest } = report;
+  function canonicalize(value: unknown): unknown {
+    if (value === null || typeof value !== "object") return value;
+    if (Array.isArray(value)) return (value as unknown[]).map(canonicalize);
+    const obj = value as Record<string, unknown>;
+    const sorted: Record<string, unknown> = {};
+    for (const key of Object.keys(obj).sort()) sorted[key] = canonicalize(obj[key]);
+    return sorted;
+  }
+  const expected = createHash("sha256")
+    .update(JSON.stringify(canonicalize(rest)))
+    .digest("hex");
+  expect(hash).toBe(expected);
 });

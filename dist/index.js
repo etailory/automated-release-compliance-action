@@ -23048,6 +23048,7 @@ async function runPremiumAudit({
 }
 
 // src/report.ts
+import { createHash } from "node:crypto";
 var REPORT_SCHEMA_VERSION = "1.0";
 var TOOL_NAME = "automated-release-compliance-action";
 var TOOL_VERSION = "0.1.0";
@@ -23088,6 +23089,22 @@ function buildComplianceReport(params) {
   }
   return report;
 }
+function canonicalize(value) {
+  if (value === null || typeof value !== "object")
+    return value;
+  if (Array.isArray(value))
+    return value.map(canonicalize);
+  const obj = value;
+  const sorted = {};
+  for (const key of Object.keys(obj).sort()) {
+    sorted[key] = canonicalize(obj[key]);
+  }
+  return sorted;
+}
+function computeReportHash(report) {
+  const { integrityHash: _omit, ...rest } = report;
+  return createHash("sha256").update(JSON.stringify(canonicalize(rest))).digest("hex");
+}
 function serializeReport(report) {
   return `${JSON.stringify(report, null, 2)}
 `;
@@ -23095,7 +23112,7 @@ function serializeReport(report) {
 
 // src/summary.ts
 async function buildJobSummary(params, builder) {
-  const { repo, release, evaluation, profile, tier, generatedAt, reportPath } = params;
+  const { repo, release, evaluation, profile, tier, generatedAt, reportPath, integrityHash } = params;
   const repoFullName = `${repo.owner}/${repo.repo}`;
   const overallIcon = evaluation.passed ? "✅" : "❌";
   builder.addHeading("Release Compliance Report", 2).addTable([
@@ -23127,11 +23144,16 @@ async function buildJobSummary(params, builder) {
 **Artifact:** \`${reportPath}\`
 `);
   }
+  if (integrityHash) {
+    builder.addRaw(`
+**Integrity:** sha256:${integrityHash}
+`);
+  }
   await builder.write();
 }
 
 // src/index.ts
-async function reportFreeTier(repo, release, evaluation, profile, tier, generatedAt, reportPath) {
+async function reportFreeTier(repo, release, evaluation, profile, tier, generatedAt, reportPath, integrityHash) {
   core.info("─".repeat(60));
   core.info(`Release compliance check — ${release.name} (${release.tag})`);
   core.info(`Profile: ${profile} | Result: ${evaluation.score}/${evaluation.total} checks passed`);
@@ -23141,22 +23163,23 @@ async function reportFreeTier(repo, release, evaluation, profile, tier, generate
   }
   core.info("─".repeat(60));
   try {
-    await buildJobSummary({ repo, release, evaluation, profile, tier, generatedAt, reportPath }, core.summary);
+    await buildJobSummary({ repo, release, evaluation, profile, tier, generatedAt, reportPath, integrityHash }, core.summary);
   } catch (err) {
     core.debug(`Could not write job summary: ${err.message}`);
   }
 }
 var VALID_PROFILES = ["default", "iso27001", "soc2", "dora"];
-function writeComplianceReport(reportPath, release, repo, evaluation, tier, commits, profile = "default") {
+function writeComplianceReport(reportPath, release, repo, evaluation, tier, generatedAt, commits, profile = "default") {
   const report = buildComplianceReport({
     release,
     repo,
     evaluation,
     tier,
     profile,
-    generatedAt: new Date().toISOString(),
+    generatedAt,
     commits
   });
+  report.integrityHash = computeReportHash(report);
   const dir = dirname(reportPath);
   if (dir && dir !== ".") {
     mkdirSync(dir, { recursive: true });
@@ -23164,6 +23187,7 @@ function writeComplianceReport(reportPath, release, repo, evaluation, tier, comm
   writeFileSync(reportPath, serializeReport(report), "utf8");
   core.info(`Wrote compliance report to ${reportPath}`);
   core.setOutput("report-path", reportPath);
+  return report.integrityHash;
 }
 async function run() {
   try {
@@ -23187,11 +23211,7 @@ async function run() {
     const tier = licenseKey ? "premium" : "free";
     const rules = getRulesForProfile(profile);
     const evaluation = evaluateChecklist(body, { release }, rules);
-    await reportFreeTier(repo, release, evaluation, profile, tier, new Date().toISOString(), reportPath || undefined);
-    core.setOutput("passed", String(evaluation.passed));
-    core.setOutput("score", `${evaluation.score}/${evaluation.total}`);
-    core.setOutput("profile", profile);
-    core.setOutput("tier", tier);
+    const generatedAt = new Date().toISOString();
     let commits;
     if (context2.payload.release) {
       const octokit = github.getOctokit(token);
@@ -23205,9 +23225,15 @@ async function run() {
         core.info(`Commit metadata: ${commits.count} commit(s) by ${commits.authors.join(", ")}`);
       }
     }
+    let integrityHash;
     if (reportPath) {
-      writeComplianceReport(reportPath, release, repo, evaluation, tier, commits, profile);
+      integrityHash = writeComplianceReport(reportPath, release, repo, evaluation, tier, generatedAt, commits, profile);
     }
+    await reportFreeTier(repo, release, evaluation, profile, tier, generatedAt, reportPath || undefined, integrityHash);
+    core.setOutput("passed", String(evaluation.passed));
+    core.setOutput("score", `${evaluation.score}/${evaluation.total}`);
+    core.setOutput("profile", profile);
+    core.setOutput("tier", tier);
     if (licenseKey) {
       const premiumResult = await runPremiumAudit({
         licenseKey,

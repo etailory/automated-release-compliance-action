@@ -160,4 +160,9 @@ export interface ComplianceReport {
   };
   /** Commit metadata fetched from the GitHub API (populated on release events). */
   commits?: CommitMetadata;
+  /**
+   * SHA-256 hex digest of the canonical JSON of all fields except this one.
+   * Lets auditors verify the artifact has not been modified after generation.
+   */
+  integrityHash?: string;
 }

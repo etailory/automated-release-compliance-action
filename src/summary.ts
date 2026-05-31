@@ -8,6 +8,8 @@ export interface SummaryParams {
   tier: "free" | "premium";
   generatedAt: string;
   reportPath?: string;
+  /** SHA-256 hex digest of the report, for tamper-evident display in the summary. */
+  integrityHash?: string;
 }
 
 /** Minimal subset of @actions/core Summary methods used by this module. */
@@ -26,7 +28,7 @@ export async function buildJobSummary(
   params: SummaryParams,
   builder: SummaryBuilder
 ): Promise<void> {
-  const { repo, release, evaluation, profile, tier, generatedAt, reportPath } = params;
+  const { repo, release, evaluation, profile, tier, generatedAt, reportPath, integrityHash } = params;
   const repoFullName = `${repo.owner}/${repo.repo}`;
   const overallIcon = evaluation.passed ? "✅" : "❌";
 
@@ -63,6 +65,10 @@ export async function buildJobSummary(
 
   if (reportPath) {
     builder.addRaw(`\n**Artifact:** \`${reportPath}\`\n`);
+  }
+
+  if (integrityHash) {
+    builder.addRaw(`\n**Integrity:** sha256:${integrityHash}\n`);
   }
 
   await builder.write();

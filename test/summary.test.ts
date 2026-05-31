@@ -231,3 +231,37 @@ test("buildJobSummary uses premium tier label in footer", async () => {
   const footer = mock.rawParts.join("\n");
   expect(footer).toContain("premium");
 });
+
+test("buildJobSummary omits integrity line when integrityHash is absent", async () => {
+  const mock = new MockSummaryBuilder();
+  await buildJobSummary(BASE_PARAMS, mock);
+
+  const all = mock.rawParts.join("\n");
+  expect(all).not.toContain("Integrity");
+  expect(all).not.toContain("sha256:");
+});
+
+test("buildJobSummary shows sha256 hash in footer when integrityHash is provided", async () => {
+  const mock = new MockSummaryBuilder();
+  const hash = "a".repeat(64);
+  await buildJobSummary({ ...BASE_PARAMS, integrityHash: hash }, mock);
+
+  const all = mock.rawParts.join("\n");
+  expect(all).toContain(`sha256:${hash}`);
+  expect(all).toContain("Integrity");
+});
+
+test("buildJobSummary integrity line appears after artifact line when both are set", async () => {
+  const mock = new MockSummaryBuilder();
+  const hash = "b".repeat(64);
+  await buildJobSummary(
+    { ...BASE_PARAMS, reportPath: "reports/report.json", integrityHash: hash },
+    mock
+  );
+
+  const all = mock.rawParts.join("\n");
+  const artifactIdx = all.indexOf("Artifact");
+  const integrityIdx = all.indexOf("Integrity");
+  expect(artifactIdx).toBeGreaterThanOrEqual(0);
+  expect(integrityIdx).toBeGreaterThan(artifactIdx);
+});
