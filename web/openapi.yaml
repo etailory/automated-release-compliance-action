@@ -27,7 +27,9 @@ info:
 
 servers:
   - url: http://localhost:3000
-    description: Local development / self-hosted container
+    description: Local development / self-hosted container (docker compose up)
+  - url: https://compliance.your-company.com
+    description: Production self-hosted deployment — replace with your actual URL
 
 tags:
   - name: health

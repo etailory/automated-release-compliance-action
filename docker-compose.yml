@@ -7,9 +7,10 @@ services:
       - "3000:3000"
     environment:
       - NODE_ENV=production
-      # SESSION_SECRET — HMAC secret for signing session tokens.
+      # PORT — HTTP port the server binds to. Default: 3000
+      - PORT=${PORT:-3000}
+      # SESSION_SECRET — HMAC secret for signing session tokens and audit signatures.
       # Required in production. Generate: openssl rand -hex 32
-      # Set in .env (preferred) or replace the ${...} reference below.
       - SESSION_SECRET=${SESSION_SECRET:-}
       # ADMIN_SECRET — protects the /admin/orgs endpoints (GET, POST, DELETE).
       # Required in production. Generate: openssl rand -hex 32
@@ -28,6 +29,14 @@ services:
       # running the admin API. Example:
       # ORGS_CONFIG=[{"id":"acme","licenseKey":"lk-secret","allowedSubs":["repo:acme/*"]}]
       - ORGS_CONFIG=${ORGS_CONFIG:-}
+      # JWKS_URL — GitHub OIDC JWKS endpoint (only override for GitHub Enterprise).
+      # Default: https://token.actions.githubusercontent.com/.well-known/jwks
+      - JWKS_URL=${JWKS_URL:-}
+      # OIDC_ISSUER — expected issuer claim in OIDC tokens.
+      # Default: https://token.actions.githubusercontent.com
+      - OIDC_ISSUER=${OIDC_ISSUER:-}
+      # OIDC_AUDIENCE — expected audience claim in OIDC tokens. Default: governor-os
+      - OIDC_AUDIENCE=${OIDC_AUDIENCE:-}
     volumes:
       # Named volume — persists org registry and audit log across restarts and
       # container replacements. Inspect with: docker volume inspect governor_os_data
