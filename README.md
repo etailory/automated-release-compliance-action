@@ -113,8 +113,9 @@ docker compose up -d
 ```
 
 The `docker-compose.yml` at the repo root builds the `web/` image, mounts a
-`./data` volume so the org registry and audit log survive restarts, and
-documents every environment variable as commented stubs.
+named Docker volume (`governor_os_data`) so the org registry and audit log
+survive container restarts and replacements, and documents every environment
+variable as commented stubs.
 
 ### Build the image manually
 
@@ -165,6 +166,7 @@ public URL where you've deployed this container:
 | `LICENSE_SECRET` | — | The license key the server accepts from the action (`Authorization: Bearer <key>`). When unset, any non-empty key is accepted (dev mode only). |
 | `ORGS_FILE` | `data/orgs.json` | Path inside the container to the org registry JSON file. |
 | `AUDIT_LOG_FILE` | `data/audit-log.ndjson` | Path inside the container to the durable audit log. |
+| `ORGS_CONFIG` | — | JSON array to seed the org registry on startup (e.g. `[{"id":"acme","licenseKey":"lk-secret","allowedSubs":["repo:acme/*"]}]`). Useful for bootstrapping without the admin API. |
 | `DATABASE_URL` | — | PostgreSQL connection string (future) |
 | `GITHUB_OIDC_JWKS_URL` | GitHub default | Override for GitHub Enterprise |
 

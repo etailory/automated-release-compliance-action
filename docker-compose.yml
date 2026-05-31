@@ -19,14 +19,19 @@ services:
       # Generate: openssl rand -hex 32
       - LICENSE_SECRET=${LICENSE_SECRET:-}
       # ORGS_FILE — path inside the container to the org registry JSON.
-      # Default: data/orgs.json (persisted via the volume below)
+      # Default: data/orgs.json (persisted via the named volume below)
       - ORGS_FILE=${ORGS_FILE:-data/orgs.json}
       # AUDIT_LOG_FILE — path inside the container to the durable audit log.
-      # Default: data/audit-log.ndjson (persisted via the volume below)
+      # Default: data/audit-log.ndjson (persisted via the named volume below)
       - AUDIT_LOG_FILE=${AUDIT_LOG_FILE:-data/audit-log.ndjson}
+      # ORGS_CONFIG — JSON array to seed the org registry on startup without
+      # running the admin API. Example:
+      # ORGS_CONFIG=[{"id":"acme","licenseKey":"lk-secret","allowedSubs":["repo:acme/*"]}]
+      - ORGS_CONFIG=${ORGS_CONFIG:-}
     volumes:
-      # Persist org registry and audit log across container restarts.
-      - ./data:/app/data
+      # Named volume — persists org registry and audit log across restarts and
+      # container replacements. Inspect with: docker volume inspect governor_os_data
+      - governor_os_data:/app/data
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
@@ -34,3 +39,7 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+
+volumes:
+  governor_os_data:
+    driver: local
