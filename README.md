@@ -58,6 +58,52 @@ jobs:
           path: compliance-report.json
 ```
 
+### Full example with integrity verification
+
+The action emits an `integrity-hash` output — a SHA-256 digest of the report file
+written at action time. A second workflow job can re-download the artifact and
+re-hash it to prove the artifact has not been tampered with between upload and audit.
+
+A complete, copy-pasteable example is in
+[`.github/examples/release-compliance.yml`](.github/examples/release-compliance.yml).
+The key pattern is a two-job workflow:
+
+```yaml
+jobs:
+  check:
+    outputs:
+      integrity-hash: ${{ steps.compliance.outputs.integrity-hash }}
+    steps:
+      - id: compliance
+        uses: markgrendev/automated-release-compliance-action@dev
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          compliance-profile: iso27001
+          report-path: compliance-report.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-compliance-report
+          path: compliance-report.json
+          retention-days: 90
+
+  verify:
+    needs: check
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-compliance-report
+      - name: Verify SHA-256 integrity hash
+        env:
+          EXPECTED_HASH: ${{ needs.check.outputs.integrity-hash }}
+        run: |
+          ACTUAL_HASH=$(sha256sum compliance-report.json | awk '{ print $1 }')
+          if [ "$ACTUAL_HASH" != "$EXPECTED_HASH" ]; then
+            echo "INTEGRITY CHECK FAILED: compliance report has been tampered with."
+            exit 1
+          fi
+          echo "Integrity check passed."
+```
+
 ### Audit evidence (`report-path`)
 
 Set the optional `report-path` input to have the action write a schema-versioned,

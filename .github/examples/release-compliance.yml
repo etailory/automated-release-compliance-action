@@ -1,0 +1,87 @@
+# Example: Governor OS Release Compliance + Artifact Integrity Verification
+#
+# Copy this file to .github/workflows/release-compliance.yml in your repository.
+# This workflow demonstrates the full ISO 27001 / SOC 2 / DORA audit-trail story:
+#   1. Run the compliance check on every published release
+#   2. Archive the tamper-evident JSON report as a CI artifact
+#   3. Re-download the artifact and verify its SHA-256 hash matches the
+#      integrity-hash output published by the action — proving the artifact
+#      has not been modified since it was written
+#
+# Prerequisites:
+#   - No secrets required for the free tier.
+#   - For premium (audit-verdict), add GOVERNOR_LICENSE_KEY and
+#     COMPLIANCE_BACKEND_URL as repository secrets (see README.md).
+
+name: Release Compliance
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  # ── Job 1: run the compliance check and archive the report ─────────────────
+  check:
+    name: Compliance Check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read   # read release metadata
+      id-token: write  # required for OIDC (premium tier)
+
+    outputs:
+      integrity-hash: ${{ steps.compliance.outputs.integrity-hash }}
+      passed: ${{ steps.compliance.outputs.passed }}
+      score: ${{ steps.compliance.outputs.score }}
+
+    steps:
+      - name: Run Governor OS compliance audit
+        id: compliance
+        uses: markgrendev/automated-release-compliance-action@dev
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          compliance-profile: iso27001   # iso27001 | soc2 | dora | general
+          report-path: compliance-report.json
+          fail-on-incomplete: "false"
+          # Uncomment for premium audit-verdict:
+          # license-key: ${{ secrets.GOVERNOR_LICENSE_KEY }}
+        # env:
+        #   COMPLIANCE_BACKEND_URL: ${{ secrets.COMPLIANCE_BACKEND_URL }}
+
+      - name: Upload compliance report artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-compliance-report
+          path: compliance-report.json
+          # Retain audit evidence for 90 days (adjust to your policy)
+          retention-days: 90
+
+  # ── Job 2: re-download the artifact and verify its integrity ───────────────
+  verify:
+    name: Verify Report Integrity
+    runs-on: ubuntu-latest
+    needs: check
+
+    steps:
+      - name: Download compliance report artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: release-compliance-report
+
+      - name: Verify SHA-256 integrity hash
+        env:
+          EXPECTED_HASH: ${{ needs.check.outputs.integrity-hash }}
+        run: |
+          ACTUAL_HASH=$(sha256sum compliance-report.json | awk '{ print $1 }')
+          echo "Expected : $EXPECTED_HASH"
+          echo "Actual   : $ACTUAL_HASH"
+          if [ "$ACTUAL_HASH" != "$EXPECTED_HASH" ]; then
+            echo "INTEGRITY CHECK FAILED: compliance report has been tampered with."
+            exit 1
+          fi
+          echo "Integrity check passed — report matches the hash published by the action."
+
+      - name: Log compliance summary
+        run: |
+          echo "Compliance passed : ${{ needs.check.outputs.passed }}"
+          echo "Score             : ${{ needs.check.outputs.score }}"
+          echo "Report            : compliance-report.json (artifact: release-compliance-report)"
