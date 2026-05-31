@@ -39,8 +39,12 @@ outputs:
     description: "Number of checklist items passed out of the total."
   tier:
     description: "Which tier ran: 'free' or 'premium'."
+  profile:
+    description: "Compliance profile that was evaluated: 'iso27001', 'soc2', 'dora', or 'default'."
   report-path:
     description: "Path of the written JSON compliance report, if 'report-path' was provided."
+  audit-verdict:
+    description: "Premium tier only. Governance verdict from the backend audit: 'approved', 'conditional', or 'blocked'."
 
 runs:
   using: "node20"

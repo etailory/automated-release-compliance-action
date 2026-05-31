@@ -14,6 +14,7 @@ import type {
   Repo,
   Logger,
   AuditPayload,
+  AuditResult,
   DispatchResult,
   PremiumAuditResult,
 } from "./types.js";
@@ -110,6 +111,49 @@ export async function dispatchToBackend(
 }
 
 /**
+ * Fetch the completed audit result for a given jobId.
+ *
+ * Attempts up to two GETs (one retry) since the backend processes audits
+ * synchronously and the result is available immediately after the POST.
+ * Returns null when COMPLIANCE_BACKEND_URL is unset, the job is not found,
+ * or the status is not yet "complete" after the retry.
+ */
+export async function fetchAuditResult(
+  licenseKey: string,
+  jobId: string
+): Promise<AuditResult | null> {
+  const base = process.env.COMPLIANCE_BACKEND_URL?.replace(/\/$/, "");
+  if (!base) return null;
+
+  const endpoint = `${base}${AUDIT_PATH}/${jobId}`;
+  const timeoutMs = Number(
+    process.env.COMPLIANCE_REQUEST_TIMEOUT_MS ?? DEFAULT_TIMEOUT_MS
+  );
+
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetch(endpoint, {
+        method: "GET",
+        headers: { Authorization: `Bearer ${licenseKey}` },
+        signal: controller.signal,
+      });
+      if (!response.ok) return null;
+      const data = (await response.json()) as {
+        status?: string;
+        result?: AuditResult;
+      };
+      if (data.status === "complete" && data.result) return data.result;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  return null;
+}
+
+/**
  * Premium entry point. Builds the audit payload and dispatches it to the
  * backend. Logs the jobId so it appears in the Action summary.
  */
@@ -150,9 +194,25 @@ export async function runPremiumAudit({
   const result = await dispatchToBackend(licenseKey, payload);
   logger.info(`Backend dispatch result: ${result.status}.`);
 
-  if (result.jobId) {
-    logger.info(`Compliance audit job queued: jobId=${result.jobId}`);
+  if (!result.jobId) {
+    return { prepared: true, endpoint, payload };
   }
 
-  return { prepared: true, endpoint, payload, jobId: result.jobId };
+  logger.info(`Compliance audit job queued: jobId=${result.jobId}`);
+
+  let auditResult: AuditResult | undefined;
+  try {
+    const fetched = await fetchAuditResult(licenseKey, result.jobId);
+    if (fetched) {
+      auditResult = fetched;
+      const verdict = fetched.governanceVerdict?.verdict ?? "unknown";
+      logger.info(`Governance verdict: ${verdict}`);
+    }
+  } catch (err) {
+    logger.warning(
+      `Could not retrieve audit result for jobId=${result.jobId}: ${(err as Error).message}`
+    );
+  }
+
+  return { prepared: true, endpoint, payload, jobId: result.jobId, auditResult };
 }

@@ -22977,6 +22977,32 @@ async function dispatchToBackend(licenseKey, payload) {
     clearTimeout(timer);
   }
 }
+async function fetchAuditResult(licenseKey, jobId) {
+  const base = process.env.COMPLIANCE_BACKEND_URL?.replace(/\/$/, "");
+  if (!base)
+    return null;
+  const endpoint = `${base}${AUDIT_PATH}/${jobId}`;
+  const timeoutMs = Number(process.env.COMPLIANCE_REQUEST_TIMEOUT_MS ?? DEFAULT_TIMEOUT_MS);
+  for (let attempt = 0;attempt < 2; attempt++) {
+    const controller = new AbortController;
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetch(endpoint, {
+        method: "GET",
+        headers: { Authorization: `Bearer ${licenseKey}` },
+        signal: controller.signal
+      });
+      if (!response.ok)
+        return null;
+      const data = await response.json();
+      if (data.status === "complete" && data.result)
+        return data.result;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  return null;
+}
 async function runPremiumAudit({
   licenseKey,
   release,
@@ -23001,10 +23027,22 @@ async function runPremiumAudit({
   logger.info(`Dispatching audit to ${endpoint}`);
   const result = await dispatchToBackend(licenseKey, payload);
   logger.info(`Backend dispatch result: ${result.status}.`);
-  if (result.jobId) {
-    logger.info(`Compliance audit job queued: jobId=${result.jobId}`);
+  if (!result.jobId) {
+    return { prepared: true, endpoint, payload };
   }
-  return { prepared: true, endpoint, payload, jobId: result.jobId };
+  logger.info(`Compliance audit job queued: jobId=${result.jobId}`);
+  let auditResult;
+  try {
+    const fetched = await fetchAuditResult(licenseKey, result.jobId);
+    if (fetched) {
+      auditResult = fetched;
+      const verdict = fetched.governanceVerdict?.verdict ?? "unknown";
+      logger.info(`Governance verdict: ${verdict}`);
+    }
+  } catch (err) {
+    logger.warning(`Could not retrieve audit result for jobId=${result.jobId}: ${err.message}`);
+  }
+  return { prepared: true, endpoint, payload, jobId: result.jobId, auditResult };
 }
 
 // src/report.ts
@@ -23139,7 +23177,7 @@ async function run() {
       writeComplianceReport(reportPath, release, repo, evaluation, tier, commits);
     }
     if (licenseKey) {
-      await runPremiumAudit({
+      const premiumResult = await runPremiumAudit({
         licenseKey,
         release,
         repo,
@@ -23149,6 +23187,34 @@ async function run() {
           debug: (m) => core.debug(m)
         }
       });
+      const auditVerdict = premiumResult.auditResult?.governanceVerdict;
+      if (auditVerdict) {
+        core.setOutput("audit-verdict", auditVerdict.verdict);
+        const verdictIcon = auditVerdict.verdict === "approved" ? "✅" : auditVerdict.verdict === "conditional" ? "⚠️" : "❌";
+        try {
+          let summaryBuilder = core.summary.addHeading("Premium Compliance Audit — Governance Verdict", 3).addTable([
+            [
+              { data: "Status", header: true },
+              { data: "Verdict", header: true },
+              { data: "Reason", header: true }
+            ],
+            [verdictIcon, auditVerdict.verdict.toUpperCase(), auditVerdict.reason]
+          ]);
+          const isoMapping = premiumResult.auditResult?.isoControlMapping;
+          if (isoMapping && Object.keys(isoMapping).length > 0) {
+            summaryBuilder = summaryBuilder.addHeading("ISO Control Mapping", 4).addTable([
+              [
+                { data: "Control", header: true },
+                { data: "Description", header: true }
+              ],
+              ...Object.entries(isoMapping).map(([ctrl, desc]) => [ctrl, desc])
+            ]);
+          }
+          await summaryBuilder.write();
+        } catch (err) {
+          core.debug(`Could not write premium verdict to summary: ${err.message}`);
+        }
+      }
     } else {
       core.info("No license key provided — running free tier only. Add a 'license-key' input to enable premium AI compliance auditing.");
     }

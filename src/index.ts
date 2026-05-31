@@ -147,7 +147,7 @@ export async function run(): Promise<void> {
     }
 
     if (licenseKey) {
-      await runPremiumAudit({
+      const premiumResult = await runPremiumAudit({
         licenseKey,
         release,
         repo,
@@ -157,6 +157,50 @@ export async function run(): Promise<void> {
           debug: (m: string) => core.debug(m),
         },
       });
+
+      const auditVerdict = premiumResult.auditResult?.governanceVerdict;
+      if (auditVerdict) {
+        core.setOutput("audit-verdict", auditVerdict.verdict);
+
+        const verdictIcon =
+          auditVerdict.verdict === "approved"
+            ? "✅"
+            : auditVerdict.verdict === "conditional"
+            ? "⚠️"
+            : "❌";
+
+        try {
+          let summaryBuilder = core.summary
+            .addHeading("Premium Compliance Audit — Governance Verdict", 3)
+            .addTable([
+              [
+                { data: "Status", header: true },
+                { data: "Verdict", header: true },
+                { data: "Reason", header: true },
+              ],
+              [verdictIcon, auditVerdict.verdict.toUpperCase(), auditVerdict.reason],
+            ]);
+
+          const isoMapping = premiumResult.auditResult?.isoControlMapping;
+          if (isoMapping && Object.keys(isoMapping).length > 0) {
+            summaryBuilder = summaryBuilder
+              .addHeading("ISO Control Mapping", 4)
+              .addTable([
+                [
+                  { data: "Control", header: true },
+                  { data: "Description", header: true },
+                ],
+                ...Object.entries(isoMapping).map(([ctrl, desc]) => [ctrl, desc]),
+              ]);
+          }
+
+          await summaryBuilder.write();
+        } catch (err) {
+          core.debug(
+            `Could not write premium verdict to summary: ${(err as Error).message}`
+          );
+        }
+      }
     } else {
       core.info(
         "No license key provided — running free tier only. Add a 'license-key' input to enable premium AI compliance auditing."

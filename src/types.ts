@@ -67,11 +67,31 @@ export interface DispatchResult {
   jobId?: string;
 }
 
+export interface GovernanceVerdict {
+  verdict: "approved" | "conditional" | "blocked";
+  reason: string;
+}
+
+export interface AuditResult {
+  auditTrailId: string;
+  repository: string;
+  release: {
+    tag: string;
+    publishedAt: string | null;
+    author: string | null;
+  };
+  governanceVerdict?: GovernanceVerdict;
+  isoControlMapping?: Record<string, string>;
+  evidencePdf?: { status: string; message: string };
+  completedAt: string;
+}
+
 export interface PremiumAuditResult {
   prepared: boolean;
   endpoint: string;
   payload: AuditPayload;
   jobId?: string;
+  auditResult?: AuditResult;
 }
 
 export interface ActionContext {

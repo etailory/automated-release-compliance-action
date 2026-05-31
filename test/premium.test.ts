@@ -2,6 +2,7 @@ import { test, expect, beforeEach, afterEach } from "bun:test";
 
 import {
   dispatchToBackend,
+  fetchAuditResult,
   runPremiumAudit,
   buildAuditPayload,
   getAuditEndpoint,
@@ -265,6 +266,178 @@ test("runPremiumAudit propagates backend errors", async () => {
       logger,
     })
   ).rejects.toThrow(/HTTP 503/);
+});
+
+// ---------------------------------------------------------------------------
+// fetchAuditResult
+// ---------------------------------------------------------------------------
+
+const SAMPLE_AUDIT_RESULT = {
+  auditTrailId: "audit-acme_widgets-v1.0.0-1717200000000",
+  repository: "acme/widgets",
+  release: { tag: "v1.0.0", publishedAt: "2026-05-31T00:00:00Z", author: "octocat" },
+  governanceVerdict: { verdict: "approved", reason: "Release meets Governor OS governance requirements." },
+  isoControlMapping: {
+    "CC6.1": "Change management: Release tag and metadata captured.",
+    "CC7.2": "System monitoring: CI workflow completion linked to release.",
+    "CC8.1": "Change management: Release notes and issue references reviewed.",
+  },
+  completedAt: "2026-05-31T00:00:01Z",
+};
+
+test("fetchAuditResult returns null when COMPLIANCE_BACKEND_URL is unset", async () => {
+  const result = await fetchAuditResult("key-123", "audit-job-001");
+  expect(result).toBeNull();
+});
+
+test("fetchAuditResult returns audit result on complete status", async () => {
+  process.env.COMPLIANCE_BACKEND_URL = "https://backend.example.com";
+
+  globalThis.fetch = async (url: RequestInfo | URL) => {
+    expect(url.toString()).toBe(
+      "https://backend.example.com/api/v1/compliance/audit/audit-job-001"
+    );
+    return new Response(
+      JSON.stringify({ success: true, jobId: "audit-job-001", status: "complete", result: SAMPLE_AUDIT_RESULT }),
+      { status: 200, headers: { "Content-Type": "application/json" } }
+    );
+  };
+
+  const result = await fetchAuditResult("key-abc", "audit-job-001");
+  expect(result).not.toBeNull();
+  expect(result?.governanceVerdict?.verdict).toBe("approved");
+  expect(result?.isoControlMapping?.["CC6.1"]).toContain("Change management");
+});
+
+test("fetchAuditResult returns null on non-2xx response", async () => {
+  process.env.COMPLIANCE_BACKEND_URL = "https://backend.example.com";
+
+  globalThis.fetch = async () => new Response("Not Found", { status: 404 });
+
+  const result = await fetchAuditResult("key-abc", "missing-job");
+  expect(result).toBeNull();
+});
+
+test("fetchAuditResult sends Authorization Bearer header", async () => {
+  process.env.COMPLIANCE_BACKEND_URL = "https://backend.example.com";
+
+  let capturedAuth: string | null = null;
+  globalThis.fetch = async (_url: RequestInfo | URL, opts?: RequestInit) => {
+    capturedAuth = (opts?.headers as Record<string, string>)?.["Authorization"] ?? null;
+    return new Response(
+      JSON.stringify({ status: "complete", result: SAMPLE_AUDIT_RESULT }),
+      { status: 200, headers: { "Content-Type": "application/json" } }
+    );
+  };
+
+  await fetchAuditResult("my-secret-key", "job-1");
+  expect(capturedAuth).toBe("Bearer my-secret-key");
+});
+
+test("fetchAuditResult retries once when status is queued, returns null", async () => {
+  process.env.COMPLIANCE_BACKEND_URL = "https://backend.example.com";
+
+  let callCount = 0;
+  globalThis.fetch = async () => {
+    callCount++;
+    return new Response(
+      JSON.stringify({ status: "queued", result: null }),
+      { status: 200, headers: { "Content-Type": "application/json" } }
+    );
+  };
+
+  const result = await fetchAuditResult("key", "job-queued");
+  expect(result).toBeNull();
+  expect(callCount).toBe(2); // initial + 1 retry
+});
+
+test("fetchAuditResult returns result on second attempt if first is queued", async () => {
+  process.env.COMPLIANCE_BACKEND_URL = "https://backend.example.com";
+
+  let callCount = 0;
+  globalThis.fetch = async () => {
+    callCount++;
+    if (callCount === 1) {
+      return new Response(
+        JSON.stringify({ status: "queued" }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
+    }
+    return new Response(
+      JSON.stringify({ status: "complete", result: SAMPLE_AUDIT_RESULT }),
+      { status: 200, headers: { "Content-Type": "application/json" } }
+    );
+  };
+
+  const result = await fetchAuditResult("key", "job-retry");
+  expect(result?.governanceVerdict?.verdict).toBe("approved");
+  expect(callCount).toBe(2);
+});
+
+// ---------------------------------------------------------------------------
+// runPremiumAudit — with audit result fetching
+// ---------------------------------------------------------------------------
+
+test("runPremiumAudit fetches and returns auditResult when backend is available", async () => {
+  process.env.COMPLIANCE_BACKEND_URL = "https://backend.example.com";
+
+  let fetchCallCount = 0;
+  globalThis.fetch = async (url: RequestInfo | URL) => {
+    fetchCallCount++;
+    const urlStr = url.toString();
+    if (urlStr.endsWith("/audit")) {
+      // POST response
+      return new Response(JSON.stringify({ jobId: "audit-xyz" }), {
+        status: 202,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    // GET /audit/:jobId
+    return new Response(
+      JSON.stringify({ status: "complete", result: SAMPLE_AUDIT_RESULT }),
+      { status: 200, headers: { "Content-Type": "application/json" } }
+    );
+  };
+
+  const logger = makeLogger();
+  const result = await runPremiumAudit({
+    licenseKey: "key-abc",
+    release: SAMPLE_RELEASE,
+    repo: SAMPLE_REPO,
+    logger,
+  });
+
+  expect(result.jobId).toBe("audit-xyz");
+  expect(result.auditResult).toBeDefined();
+  expect(result.auditResult?.governanceVerdict?.verdict).toBe("approved");
+  expect(logger.messages.some((m) => m.includes("Governance verdict: approved"))).toBe(true);
+  expect(fetchCallCount).toBe(2); // POST + GET
+});
+
+test("runPremiumAudit returns result without auditResult when GET fails", async () => {
+  process.env.COMPLIANCE_BACKEND_URL = "https://backend.example.com";
+
+  globalThis.fetch = async (url: RequestInfo | URL) => {
+    const urlStr = url.toString();
+    if (urlStr.endsWith("/audit")) {
+      return new Response(JSON.stringify({ jobId: "audit-xyz" }), {
+        status: 202,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return new Response("Internal Server Error", { status: 500 });
+  };
+
+  const logger = makeLogger();
+  const result = await runPremiumAudit({
+    licenseKey: "key-abc",
+    release: SAMPLE_RELEASE,
+    repo: SAMPLE_REPO,
+    logger,
+  });
+
+  expect(result.jobId).toBe("audit-xyz");
+  expect(result.auditResult).toBeUndefined();
 });
 
 // ---------------------------------------------------------------------------
