@@ -531,6 +531,13 @@ paths:
         organization registry is non-empty, the request must include a valid
         `Authorization: Bearer <session-token|license-key>` header. In development
         / free-tier mode (neither condition active) the endpoint is open.
+
+        **Org scope (enforcement mode):** When the authenticated token carries an
+        `orgId` (registry-enforced multi-tenant mode), the job's repository owner
+        must match the authenticated organization. Cross-org access returns `403`.
+        Single-tenant `LICENSE_SECRET` mode (`orgId` is null) is exempt.
+
+        **Rate limit:** 60 requests per minute per IP.
       operationId: getAuditJob
       security:
         - BearerAuth: []
@@ -550,6 +557,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/AuditJobResponse'
+        "401":
+          description: Missing or invalid Authorization header (enforcement mode only)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "403":
+          description: |
+            Organization not registered / evicted, or cross-org access denied
+            (job belongs to a different organization).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         "404":
           description: Job ID not found
           content:
@@ -558,6 +579,12 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
         "410":
           description: Job has expired and been evicted (was present within the last 24 hours)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "429":
+          description: Rate limit exceeded (60 requests per minute per IP)
           content:
             application/json:
               schema:

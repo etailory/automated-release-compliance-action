@@ -22,6 +22,7 @@ import {
   validateLicenseKey,
   _auditLimiterStore,
   _verifyLimiterStore,
+  _getAuditLimiterStore,
   _resetJwksCache,
   _loadOrgsFromFile,
   _flushOrgsToFile,
@@ -111,6 +112,7 @@ beforeEach(async () => {
   // Reset rate limiter counters so tests don't bleed into each other
   await _auditLimiterStore.resetAll?.();
   await _verifyLimiterStore.resetAll?.();
+  await _getAuditLimiterStore.resetAll?.();
   // Ensure sensitive env vars are unset by default
   delete process.env.LICENSE_SECRET;
   delete process.env.ADMIN_SECRET;
@@ -1282,6 +1284,129 @@ describe('GET /admin/audit-jobs', () => {
     const { body } = await req('GET', '/admin/audit-jobs', undefined, ADMIN);
     assert.equal(body.length, 1);
     assert.ok(typeof body[0].completedAt === 'string', 'completedAt must be present for complete jobs');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/compliance/audit/:jobId — org scope enforcement
+// ---------------------------------------------------------------------------
+
+describe('GET /api/v1/compliance/audit/:jobId — org scope', () => {
+  test('returns 403 when token org does not match job repository owner (cross-org access)', async () => {
+    orgRegistry.set('acme',       { licenseKey: 'lk-acme',  allowedSubs: ['repo:acme/*'] });
+    orgRegistry.set('other-corp', { licenseKey: 'lk-other', allowedSubs: ['repo:other-corp/*'] });
+
+    // other-corp submits a job for their own repo
+    const otherPayload = { ...VALID_AUDIT_PAYLOAD, repository: 'other-corp/widgets' };
+    const { body: post } = await req('POST', '/api/v1/compliance/audit', otherPayload, {
+      Authorization: 'Bearer lk-other',
+    });
+    assert.equal(post.success, true, 'Expected POST to succeed for other-corp');
+
+    // acme tries to read other-corp's job
+    const { status, body } = await req('GET', `/api/v1/compliance/audit/${post.jobId}`, undefined, {
+      Authorization: 'Bearer lk-acme',
+    });
+    assert.equal(status, 403);
+    assert.equal(body.success, false);
+  });
+
+  test('returns 200 when token org matches job repository owner (same-org access)', async () => {
+    orgRegistry.set('acme', { licenseKey: 'lk-acme', allowedSubs: ['repo:acme/*'] });
+
+    const { body: post } = await req('POST', '/api/v1/compliance/audit', VALID_AUDIT_PAYLOAD, {
+      Authorization: 'Bearer lk-acme',
+    });
+    assert.equal(post.success, true, 'Expected POST to succeed for acme');
+
+    const { status, body } = await req('GET', `/api/v1/compliance/audit/${post.jobId}`, undefined, {
+      Authorization: 'Bearer lk-acme',
+    });
+    assert.equal(status, 200);
+    assert.equal(body.success, true);
+    assert.equal(body.result.repository, 'acme/widgets');
+  });
+
+  test('org scope check also works with a session token', async () => {
+    orgRegistry.set('acme', { licenseKey: 'lk-acme', allowedSubs: ['repo:owner/repo*'] });
+    orgRegistry.set('other-corp', { licenseKey: 'lk-other', allowedSubs: ['repo:other-corp/*'] });
+
+    // Obtain session token for 'acme'
+    const oidcToken = await mintOidcJwt();
+    const { body: vBody } = await req('POST', '/api/v1/compliance/verify', {
+      ...VALID_VERIFY_BODY,
+      organizationId: 'acme',
+      oidcToken,
+    });
+    assert.equal(vBody.success, true, 'Expected verify to succeed');
+
+    // Inject a job that belongs to other-corp
+    const jobId = 'audit-other-corp_widgets-scope-test';
+    auditJobs.set(jobId, {
+      status:      'complete',
+      submittedAt: new Date().toISOString(),
+      completedAt: new Date().toISOString(),
+      repository:  'other-corp/widgets',
+      tag:         'v1.0.0',
+      expiresAt:   Date.now() + 86_400_000,
+      result: {
+        auditTrailId: jobId,
+        repository:   'other-corp/widgets',
+        release:      { tag: 'v1.0.0', publishedAt: null, author: null },
+        completedAt:  new Date().toISOString(),
+      },
+    });
+
+    const { status, body } = await req('GET', `/api/v1/compliance/audit/${jobId}`, undefined, {
+      Authorization: `Bearer ${vBody.sessionToken}`,
+    });
+    assert.equal(status, 403);
+    assert.equal(body.success, false);
+  });
+
+  test('dev mode (no LICENSE_SECRET, empty registry) has no org scope check', async () => {
+    // beforeEach already clears registry and deletes LICENSE_SECRET
+    const { body: post } = await req('POST', '/api/v1/compliance/audit', VALID_AUDIT_PAYLOAD, {
+      Authorization: 'Bearer test-key',
+    });
+    const { status } = await req('GET', `/api/v1/compliance/audit/${post.jobId}`);
+    assert.equal(status, 200);
+  });
+
+  test('single-tenant LICENSE_SECRET mode (null orgId) skips org scope check', async () => {
+    process.env.LICENSE_SECRET = 'single-tenant-key';
+
+    const { body: post } = await req('POST', '/api/v1/compliance/audit', VALID_AUDIT_PAYLOAD, {
+      Authorization: 'Bearer single-tenant-key',
+    });
+    assert.equal(post.success, true);
+
+    const { status } = await req('GET', `/api/v1/compliance/audit/${post.jobId}`, undefined, {
+      Authorization: 'Bearer single-tenant-key',
+    });
+    assert.equal(status, 200);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/compliance/audit/:jobId — rate limiting
+// ---------------------------------------------------------------------------
+
+describe('GET /api/v1/compliance/audit/:jobId — rate limiting', () => {
+  test('returns 429 after exceeding 60 requests per minute', async () => {
+    const { body: post } = await req('POST', '/api/v1/compliance/audit', VALID_AUDIT_PAYLOAD, {
+      Authorization: 'Bearer test-key',
+    });
+
+    const responses = await Promise.all(
+      Array.from({ length: 61 }, () =>
+        req('GET', `/api/v1/compliance/audit/${post.jobId}`)
+      )
+    );
+    const tooMany = responses.filter(r => r.status === 429);
+    assert.ok(tooMany.length >= 1, 'Expected at least one 429 response');
+    assert.equal(tooMany[0].body.success, false);
+    assert.match(tooMany[0].body.error, /Too many/);
   });
 });
 

@@ -333,8 +333,9 @@ function getSessionSecret() {
 // Rate limiters — exported so tests can reset stores between runs
 // ---------------------------------------------------------------------------
 
-export const _auditLimiterStore  = new MemoryStore();
-export const _verifyLimiterStore = new MemoryStore();
+export const _auditLimiterStore    = new MemoryStore();
+export const _verifyLimiterStore   = new MemoryStore();
+export const _getAuditLimiterStore = new MemoryStore();
 
 const auditLimiter = rateLimit({
   windowMs:       60_000,
@@ -352,6 +353,15 @@ const verifyLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders:  false,
   message: { success: false, error: 'Too many verification requests. Please retry after 5 minutes.' },
+});
+
+const getAuditLimiter = rateLimit({
+  windowMs:       60_000,
+  max:            60,
+  store:          _getAuditLimiterStore,
+  standardHeaders: true,
+  legacyHeaders:  false,
+  message: { success: false, error: 'Too many requests. Please retry after 1 minute.' },
 });
 
 // ---------------------------------------------------------------------------
@@ -538,7 +548,7 @@ app.post('/api/v1/compliance/audit', auditLimiter, async (req, res) => {
 // Response: { success, jobId, status, message, result? }
 // ---------------------------------------------------------------------------
 
-app.get('/api/v1/compliance/audit/:jobId', async (req, res) => {
+app.get('/api/v1/compliance/audit/:jobId', getAuditLimiter, async (req, res) => {
   try {
     const { jobId } = req.params;
 
@@ -548,6 +558,7 @@ app.get('/api/v1/compliance/audit/:jobId', async (req, res) => {
 
     // Require auth in enforcement mode (LICENSE_SECRET set or org registry non-empty).
     // Dev mode (both unset/empty) preserves the previous open behaviour for free-tier callers.
+    let authResult = null;
     if (process.env.LICENSE_SECRET || isRegistryEnforced()) {
       const authHeader  = req.headers['authorization'] ?? '';
       const bearerToken = authHeader.startsWith('Bearer ')
@@ -561,7 +572,7 @@ app.get('/api/v1/compliance/audit/:jobId', async (req, res) => {
         });
       }
 
-      const authResult = await authenticateBearerToken(bearerToken);
+      authResult = await authenticateBearerToken(bearerToken);
       if (!authResult.valid) {
         return res.status(401).json({
           success: false,
@@ -586,6 +597,19 @@ app.get('/api/v1/compliance/audit/:jobId', async (req, res) => {
         return res.status(410).json({ success: false, error: `Audit job expired and has been evicted: ${jobId}` });
       }
       return res.status(404).json({ success: false, error: `Audit job not found: ${jobId}` });
+    }
+
+    // Org scope enforcement: when authenticated with a specific orgId in registry-enforced
+    // mode, the job's repository owner must match the authenticated org. orgId is null in
+    // single-tenant LICENSE_SECRET mode — skip the check in that case.
+    if (authResult?.orgId && isRegistryEnforced()) {
+      const jobRepoOwner = jobStatus.result?.repository?.split('/')[0];
+      if (jobRepoOwner !== authResult.orgId) {
+        return res.status(403).json({
+          success: false,
+          error:   'Access denied: this audit job belongs to a different organization.',
+        });
+      }
     }
 
     return res.status(200).json({
