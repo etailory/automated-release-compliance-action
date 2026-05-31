@@ -22,11 +22,12 @@ priority is a **deployable MVP usable by real companies**, not feature breadth.
 
 ```bash
 bun install          # install root deps
-bun test             # run unit tests
+bun test             # TypeScript unit tests (src/ library, scoped to test/)
 bun run build        # bundle src/index.ts -> dist/index.js
 
 cd action && npm install   # action deps
 cd web && npm install      # web server deps
+cd web && node --test server.test.js  # Express API integration tests
 ```
 
 Before committing changes to `src/`, run `bun test` and `bun run build` and
