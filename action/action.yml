@@ -23,9 +23,9 @@ inputs:
     default: "false"
 
   compliance-profile:
-    description: "Compliance framework profile to check against. Accepted values: 'iso27001', 'soc2', 'dora', 'general'. Defaults to 'general' (baseline checklist). Profile-specific rule sets are enabled when a valid profile is specified."
+    description: "Compliance profile to evaluate against: 'iso27001', 'soc2', 'dora', or 'default'. Determines which checklist rules are applied."
     required: false
-    default: "general"
+    default: "default"
 
   report-path:
     description: "Optional path to write a machine-readable JSON compliance report (audit evidence). When set, a schema-versioned report is written and can be archived as a CI artifact. When omitted, no file is written."

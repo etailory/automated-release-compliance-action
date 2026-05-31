@@ -75,6 +75,8 @@ export interface ActionContext {
   repo?: Repo;
 }
 
+export type ComplianceProfile = "default" | "iso27001" | "soc2" | "dora";
+
 /**
  * A durable, machine-readable record of a single release compliance evaluation.
  *
