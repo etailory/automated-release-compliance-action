@@ -208,6 +208,35 @@ test("computeReportHash changes when report content changes", () => {
   expect(computeReportHash(report2)).not.toBe(hash1);
 });
 
+test("buildComplianceReport includes customRulesPath when provided", () => {
+  const evaluation = evaluateChecklist(RELEASE.body);
+  const report = buildComplianceReport({
+    release: RELEASE,
+    repo: REPO,
+    evaluation,
+    tier: "free",
+    profile: "default",
+    generatedAt: AT,
+    customRulesPath: ".github/compliance/custom-rules.json",
+  });
+
+  expect(report.customRulesPath).toBe(".github/compliance/custom-rules.json");
+});
+
+test("buildComplianceReport omits customRulesPath when not provided", () => {
+  const evaluation = evaluateChecklist(RELEASE.body);
+  const report = buildComplianceReport({
+    release: RELEASE,
+    repo: REPO,
+    evaluation,
+    tier: "free",
+    profile: "default",
+    generatedAt: AT,
+  });
+
+  expect(report.customRulesPath).toBeUndefined();
+});
+
 test("computeReportHash matches independently computed SHA-256", () => {
   const evaluation = evaluateChecklist(RELEASE.body);
   const report = buildComplianceReport({

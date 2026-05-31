@@ -65,7 +65,8 @@ function writeComplianceReport(
   tier: "free" | "premium",
   generatedAt: string,
   commits?: CommitMetadata,
-  profile: ComplianceProfile = "default"
+  profile: ComplianceProfile = "default",
+  customRulesPath?: string
 ): string {
   const report = buildComplianceReport({
     release,
@@ -75,6 +76,7 @@ function writeComplianceReport(
     profile,
     generatedAt,
     commits,
+    customRulesPath,
   });
 
   report.integrityHash = computeReportHash(report);
@@ -126,9 +128,12 @@ export async function run(): Promise<void> {
     const tier = licenseKey ? "premium" : "free";
     const customRulesPath = core.getInput("custom-rules-path").trim();
     const profileRules = getRulesForProfile(profile);
-    const rules = customRulesPath
-      ? [...profileRules, ...loadCustomRules(customRulesPath)]
-      : profileRules;
+    let rules = profileRules;
+    if (customRulesPath) {
+      const customRules = loadCustomRules(customRulesPath);
+      core.info(`Loaded ${customRules.length} custom rule(s) from ${customRulesPath}`);
+      rules = [...profileRules, ...customRules];
+    }
     const evaluation = evaluateChecklist(body, { release }, rules);
     const generatedAt = new Date().toISOString();
 
@@ -155,7 +160,8 @@ export async function run(): Promise<void> {
     let integrityHash: string | undefined;
     if (reportPath) {
       integrityHash = writeComplianceReport(
-        reportPath, release, repo, evaluation, tier, generatedAt, commits, profile
+        reportPath, release, repo, evaluation, tier, generatedAt, commits, profile,
+        customRulesPath || undefined
       );
       core.setOutput("integrity-hash", integrityHash);
     }

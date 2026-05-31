@@ -38,7 +38,8 @@ export const TOOL_VERSION = "0.1.0";
  * @param params.repo         The `owner`/`repo` the release belongs to.
  * @param params.evaluation   Result of {@link evaluateChecklist}.
  * @param params.tier         Which tier produced the evaluation.
- * @param params.generatedAt  ISO-8601 timestamp; injected for determinism.
+ * @param params.generatedAt     ISO-8601 timestamp; injected for determinism.
+ * @param params.customRulesPath Path to the custom rules file, when one was active.
  */
 export function buildComplianceReport(params: {
   release: Release;
@@ -48,8 +49,9 @@ export function buildComplianceReport(params: {
   profile: ComplianceProfile;
   generatedAt: string;
   commits?: CommitMetadata;
+  customRulesPath?: string;
 }): ComplianceReport {
-  const { release, repo, evaluation, tier, profile, generatedAt, commits } = params;
+  const { release, repo, evaluation, tier, profile, generatedAt, commits, customRulesPath } = params;
 
   const report: ComplianceReport = {
     schemaVersion: REPORT_SCHEMA_VERSION,
@@ -85,6 +87,10 @@ export function buildComplianceReport(params: {
       authors: [...commits.authors],
       shas: [...commits.shas],
     };
+  }
+
+  if (customRulesPath) {
+    report.customRulesPath = customRulesPath;
   }
 
   return report;

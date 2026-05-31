@@ -165,6 +165,12 @@ export interface ComplianceReport {
   /** Commit metadata fetched from the GitHub API (populated on release events). */
   commits?: CommitMetadata;
   /**
+   * Path to the custom rules file that was active during evaluation.
+   * When set, this field makes the audit trail complete: auditors can trace
+   * exactly which org-specific controls contributed to the compliance result.
+   */
+  customRulesPath?: string;
+  /**
    * SHA-256 hex digest of the canonical JSON of all fields except this one.
    * Lets auditors verify the artifact has not been modified after generation.
    */

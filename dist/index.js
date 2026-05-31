@@ -23117,7 +23117,7 @@ var REPORT_SCHEMA_VERSION = "1.0";
 var TOOL_NAME = "automated-release-compliance-action";
 var TOOL_VERSION = "0.1.0";
 function buildComplianceReport(params) {
-  const { release, repo, evaluation, tier, profile, generatedAt, commits } = params;
+  const { release, repo, evaluation, tier, profile, generatedAt, commits, customRulesPath } = params;
   const report = {
     schemaVersion: REPORT_SCHEMA_VERSION,
     generatedAt,
@@ -23150,6 +23150,9 @@ function buildComplianceReport(params) {
       authors: [...commits.authors],
       shas: [...commits.shas]
     };
+  }
+  if (customRulesPath) {
+    report.customRulesPath = customRulesPath;
   }
   return report;
 }
@@ -23247,7 +23250,7 @@ async function reportFreeTier(repo, release, evaluation, profile, tier, generate
   }
 }
 var VALID_PROFILES = ["default", "iso27001", "soc2", "dora"];
-function writeComplianceReport(reportPath, release, repo, evaluation, tier, generatedAt, commits, profile = "default") {
+function writeComplianceReport(reportPath, release, repo, evaluation, tier, generatedAt, commits, profile = "default", customRulesPath) {
   const report = buildComplianceReport({
     release,
     repo,
@@ -23255,7 +23258,8 @@ function writeComplianceReport(reportPath, release, repo, evaluation, tier, gene
     tier,
     profile,
     generatedAt,
-    commits
+    commits,
+    customRulesPath
   });
   report.integrityHash = computeReportHash(report);
   const dir = dirname(reportPath);
@@ -23293,7 +23297,12 @@ async function run() {
     const tier = licenseKey ? "premium" : "free";
     const customRulesPath = core.getInput("custom-rules-path").trim();
     const profileRules = getRulesForProfile(profile);
-    const rules = customRulesPath ? [...profileRules, ...loadCustomRules(customRulesPath)] : profileRules;
+    let rules = profileRules;
+    if (customRulesPath) {
+      const customRules = loadCustomRules(customRulesPath);
+      core.info(`Loaded ${customRules.length} custom rule(s) from ${customRulesPath}`);
+      rules = [...profileRules, ...customRules];
+    }
     const evaluation = evaluateChecklist(body, { release }, rules);
     const generatedAt = new Date().toISOString();
     let commits;
@@ -23311,7 +23320,7 @@ async function run() {
     }
     let integrityHash;
     if (reportPath) {
-      integrityHash = writeComplianceReport(reportPath, release, repo, evaluation, tier, generatedAt, commits, profile);
+      integrityHash = writeComplianceReport(reportPath, release, repo, evaluation, tier, generatedAt, commits, profile, customRulesPath || undefined);
       core.setOutput("integrity-hash", integrityHash);
     }
     await reportFreeTier(repo, release, evaluation, profile, tier, generatedAt, reportPath || undefined, integrityHash);
