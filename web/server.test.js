@@ -24,6 +24,7 @@ import {
   _verifyLimiterStore,
   _getAuditLimiterStore,
   _listAuditsLimiterStore,
+  _exportAuditsLimiterStore,
   _resetJwksCache,
   _loadOrgsFromFile,
   _flushOrgsToFile,
@@ -116,6 +117,7 @@ beforeEach(async () => {
   await _verifyLimiterStore.resetAll?.();
   await _getAuditLimiterStore.resetAll?.();
   await _listAuditsLimiterStore.resetAll?.();
+  await _exportAuditsLimiterStore.resetAll?.();
   // Ensure sensitive env vars are unset by default
   delete process.env.LICENSE_SECRET;
   delete process.env.ADMIN_SECRET;
@@ -145,8 +147,16 @@ async function req(method, path, body, headers = {}) {
   if (body !== undefined) opts.body = JSON.stringify(body);
   const res  = await fetch(`${baseUrl}${path}`, opts);
   const text = await res.text();
-  const json = text ? JSON.parse(text) : null;
-  return { status: res.status, body: json };
+  let json = null;
+  try { json = text ? JSON.parse(text) : null; } catch { /* non-JSON body */ }
+  return { status: res.status, body: json, text, headers: res.headers };
+}
+
+/** Fetch a path and return the raw response text and headers (no JSON parsing). */
+async function reqRaw(path, headers = {}) {
+  const res  = await fetch(`${baseUrl}${path}`, { headers });
+  const text = await res.text();
+  return { status: res.status, text, headers: res.headers };
 }
 
 /**
@@ -2014,5 +2024,255 @@ describe('_findJobsInAuditLog', () => {
     for (const r of result.records) {
       assert.equal(r.repository, 'acme/widgets');
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/compliance/audits/export — CSV and JSON export
+// ---------------------------------------------------------------------------
+
+describe('GET /api/v1/compliance/audits/export — CSV output', () => {
+  const AUTH = { Authorization: 'Bearer test-key' };
+
+  test('returns 200 with text/csv content-type by default', async () => {
+    await req('POST', '/api/v1/compliance/audit', VALID_AUDIT_PAYLOAD, AUTH);
+    const { status, headers } = await reqRaw('/api/v1/compliance/audits/export', AUTH);
+    assert.equal(status, 200);
+    assert.ok(headers.get('content-type')?.startsWith('text/csv'), 'Content-Type must be text/csv');
+  });
+
+  test('returns CSV with correct column headers', async () => {
+    await req('POST', '/api/v1/compliance/audit', VALID_AUDIT_PAYLOAD, AUTH);
+    const { text } = await reqRaw('/api/v1/compliance/audits/export', AUTH);
+    const firstLine = text.split('\n')[0];
+    assert.equal(firstLine, 'jobId,repository,tag,profile,verdict,submittedAt,completedAt');
+  });
+
+  test('returns Content-Disposition attachment header for CSV', async () => {
+    const { headers } = await reqRaw('/api/v1/compliance/audits/export', AUTH);
+    const cd = headers.get('content-disposition') ?? '';
+    assert.ok(cd.startsWith('attachment;'), 'Content-Disposition must start with attachment');
+    assert.ok(cd.includes('audit-export-'), 'filename must contain audit-export-');
+    assert.ok(cd.endsWith('.csv"'), 'filename must end with .csv');
+  });
+
+  test('CSV rows contain correct values from audit jobs', async () => {
+    await req('POST', '/api/v1/compliance/audit', VALID_AUDIT_PAYLOAD, AUTH);
+    const { text } = await reqRaw('/api/v1/compliance/audits/export', AUTH);
+    const lines = text.trim().split('\n');
+    assert.equal(lines.length, 2, 'Header row + 1 data row');
+    const dataRow = lines[1];
+    assert.ok(dataRow.includes('acme/widgets'), 'row must contain repository');
+    assert.ok(dataRow.includes('v1.2.0'), 'row must contain tag');
+    assert.ok(dataRow.includes('approved'), 'row must contain verdict');
+  });
+
+  test('?format=csv explicitly returns CSV', async () => {
+    await req('POST', '/api/v1/compliance/audit', VALID_AUDIT_PAYLOAD, AUTH);
+    const { status, headers } = await reqRaw('/api/v1/compliance/audits/export?format=csv', AUTH);
+    assert.equal(status, 200);
+    assert.ok(headers.get('content-type')?.startsWith('text/csv'));
+  });
+
+  test('returns 400 for unknown format', async () => {
+    const { status, body } = await req('GET', '/api/v1/compliance/audits/export?format=xml');
+    assert.equal(status, 400);
+    assert.equal(body.success, false);
+    assert.match(body.error, /format/);
+  });
+
+  test('CSV includes all submitted jobs', async () => {
+    await req('POST', '/api/v1/compliance/audit', VALID_AUDIT_PAYLOAD, AUTH);
+    await req('POST', '/api/v1/compliance/audit', VALID_AUDIT_PAYLOAD, AUTH);
+    const { text } = await reqRaw('/api/v1/compliance/audits/export', AUTH);
+    const dataLines = text.trim().split('\n').slice(1);
+    assert.equal(dataLines.length, 2, 'Should include 2 data rows');
+  });
+
+  test('empty export returns only the header row', async () => {
+    const { status, text } = await reqRaw('/api/v1/compliance/audits/export', AUTH);
+    assert.equal(status, 200);
+    const lines = text.trim().split('\n');
+    assert.equal(lines.length, 1, 'Only the header row for empty log');
+    assert.equal(lines[0], 'jobId,repository,tag,profile,verdict,submittedAt,completedAt');
+  });
+});
+
+describe('GET /api/v1/compliance/audits/export — JSON output', () => {
+  const AUTH = { Authorization: 'Bearer test-key' };
+
+  test('?format=json returns application/json content-type', async () => {
+    await req('POST', '/api/v1/compliance/audit', VALID_AUDIT_PAYLOAD, AUTH);
+    const { status, headers } = await reqRaw('/api/v1/compliance/audits/export?format=json', AUTH);
+    assert.equal(status, 200);
+    assert.ok(headers.get('content-type')?.startsWith('application/json'));
+  });
+
+  test('?format=json returns Content-Disposition attachment with .json filename', async () => {
+    const { headers } = await reqRaw('/api/v1/compliance/audits/export?format=json', AUTH);
+    const cd = headers.get('content-disposition') ?? '';
+    assert.ok(cd.startsWith('attachment;'), 'Content-Disposition must start with attachment');
+    assert.ok(cd.endsWith('.json"'), 'filename must end with .json');
+  });
+
+  test('?format=json returns a JSON array with correct fields', async () => {
+    await req('POST', '/api/v1/compliance/audit', VALID_AUDIT_PAYLOAD, AUTH);
+    const { status, body } = await req('GET', '/api/v1/compliance/audits/export?format=json');
+    assert.equal(status, 200);
+    assert.ok(Array.isArray(body), 'response must be a JSON array');
+    assert.equal(body.length, 1);
+    const row = body[0];
+    assert.ok('jobId'       in row, 'must have jobId');
+    assert.ok('repository'  in row, 'must have repository');
+    assert.ok('tag'         in row, 'must have tag');
+    assert.ok('profile'     in row, 'must have profile');
+    assert.ok('verdict'     in row, 'must have verdict');
+    assert.ok('submittedAt' in row, 'must have submittedAt');
+    assert.ok('completedAt' in row, 'must have completedAt');
+  });
+
+  test('JSON export contains correct field values', async () => {
+    await req('POST', '/api/v1/compliance/audit', VALID_AUDIT_PAYLOAD, AUTH);
+    const { body } = await req('GET', '/api/v1/compliance/audits/export?format=json');
+    const row = body[0];
+    assert.equal(row.repository, 'acme/widgets');
+    assert.equal(row.tag, 'v1.2.0');
+    assert.equal(row.verdict, 'approved');
+  });
+
+  test('?format=json returns empty array when no jobs exist', async () => {
+    const { status, body } = await req('GET', '/api/v1/compliance/audits/export?format=json');
+    assert.equal(status, 200);
+    assert.ok(Array.isArray(body));
+    assert.equal(body.length, 0);
+  });
+});
+
+describe('GET /api/v1/compliance/audits/export — date range filter', () => {
+  const AUTH = { Authorization: 'Bearer test-key' };
+
+  test('?from filters out records before the date', async () => {
+    // Use a future ?from to exclude all records submitted now.
+    await req('POST', '/api/v1/compliance/audit', VALID_AUDIT_PAYLOAD, AUTH);
+    const futureFrom = '2099-01-01T00:00:00Z';
+    const { status, body } = await req('GET', `/api/v1/compliance/audits/export?format=json&from=${encodeURIComponent(futureFrom)}`);
+    assert.equal(status, 200);
+    assert.ok(Array.isArray(body));
+    assert.equal(body.length, 0, 'No records should be at or after 2099');
+  });
+
+  test('?to filters out records after the date', async () => {
+    await req('POST', '/api/v1/compliance/audit', VALID_AUDIT_PAYLOAD, AUTH);
+    const pastTo = '2000-01-01T00:00:00Z';
+    const { body } = await req('GET', `/api/v1/compliance/audits/export?format=json&to=${encodeURIComponent(pastTo)}`);
+    assert.ok(Array.isArray(body));
+    assert.equal(body.length, 0, 'No records should be before year 2000');
+  });
+
+  test('?from and ?to together return only matching records', async () => {
+    await req('POST', '/api/v1/compliance/audit', VALID_AUDIT_PAYLOAD, AUTH);
+    // A wide window that covers now should return the record
+    const from = '2020-01-01T00:00:00Z';
+    const to   = '2099-12-31T23:59:59Z';
+    const { body } = await req('GET', `/api/v1/compliance/audits/export?format=json&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`);
+    assert.ok(Array.isArray(body));
+    assert.equal(body.length, 1, 'The record should be within the 2020–2099 window');
+  });
+
+  test('invalid ?from returns 400', async () => {
+    const { status, body } = await req('GET', '/api/v1/compliance/audits/export?from=not-a-date');
+    assert.equal(status, 400);
+    assert.equal(body.success, false);
+    assert.match(body.error, /from date/);
+  });
+
+  test('invalid ?to returns 400', async () => {
+    const { status, body } = await req('GET', '/api/v1/compliance/audits/export?to=not-a-date');
+    assert.equal(status, 400);
+    assert.equal(body.success, false);
+    assert.match(body.error, /to date/);
+  });
+});
+
+describe('GET /api/v1/compliance/audits/export — repository filter', () => {
+  const AUTH = { Authorization: 'Bearer test-key' };
+
+  test('?repository filters to matching repo only', async () => {
+    const p1 = { ...VALID_AUDIT_PAYLOAD, repository: 'acme/widgets' };
+    const p2 = { ...VALID_AUDIT_PAYLOAD, repository: 'acme/other-repo' };
+    await req('POST', '/api/v1/compliance/audit', p1, AUTH);
+    await req('POST', '/api/v1/compliance/audit', p2, AUTH);
+
+    const { body } = await req('GET', '/api/v1/compliance/audits/export?format=json&repository=acme%2Fwidgets');
+    assert.ok(Array.isArray(body));
+    assert.equal(body.length, 1);
+    assert.equal(body[0].repository, 'acme/widgets');
+  });
+
+  test('?repository returns empty array when no match', async () => {
+    await req('POST', '/api/v1/compliance/audit', VALID_AUDIT_PAYLOAD, AUTH);
+    const { body } = await req('GET', '/api/v1/compliance/audits/export?format=json&repository=no%2Fmatch');
+    assert.ok(Array.isArray(body));
+    assert.equal(body.length, 0);
+  });
+});
+
+describe('GET /api/v1/compliance/audits/export — auth', () => {
+  test('returns 401 when LICENSE_SECRET is set and Authorization is absent', async () => {
+    process.env.LICENSE_SECRET = 'secret-key';
+    const { status, body } = await req('GET', '/api/v1/compliance/audits/export');
+    assert.equal(status, 401);
+    assert.equal(body.success, false);
+  });
+
+  test('returns 401 when LICENSE_SECRET is set and token is wrong', async () => {
+    process.env.LICENSE_SECRET = 'secret-key';
+    const { status, body } = await req('GET', '/api/v1/compliance/audits/export', undefined, {
+      Authorization: 'Bearer wrong-key',
+    });
+    assert.equal(status, 401);
+    assert.equal(body.success, false);
+  });
+
+  test('returns 200 when LICENSE_SECRET is set and token matches', async () => {
+    process.env.LICENSE_SECRET = 'secret-key';
+    const { status } = await req('GET', '/api/v1/compliance/audits/export?format=json', undefined, {
+      Authorization: 'Bearer secret-key',
+    });
+    assert.equal(status, 200);
+  });
+
+  test('dev mode (no LICENSE_SECRET, empty registry) allows unauthenticated access', async () => {
+    const { status } = await req('GET', '/api/v1/compliance/audits/export?format=json');
+    assert.equal(status, 200);
+  });
+
+  test('multi-tenant: export scoped to authenticated org only', async () => {
+    orgRegistry.set('acme',       { licenseKey: 'lk-acme',  allowedSubs: ['repo:acme/*'] });
+    orgRegistry.set('other-corp', { licenseKey: 'lk-other', allowedSubs: ['repo:other-corp/*'] });
+
+    const acmePayload  = { ...VALID_AUDIT_PAYLOAD, repository: 'acme/widgets' };
+    const otherPayload = { ...VALID_AUDIT_PAYLOAD, repository: 'other-corp/app' };
+    await req('POST', '/api/v1/compliance/audit', acmePayload,  { Authorization: 'Bearer lk-acme' });
+    await req('POST', '/api/v1/compliance/audit', otherPayload, { Authorization: 'Bearer lk-other' });
+
+    const { body } = await req('GET', '/api/v1/compliance/audits/export?format=json', undefined, {
+      Authorization: 'Bearer lk-acme',
+    });
+    assert.ok(Array.isArray(body));
+    assert.equal(body.length, 1);
+    assert.equal(body[0].repository.split('/')[0], 'acme', 'acme should only see its own jobs');
+  });
+});
+
+describe('GET /api/v1/compliance/audits/export — rate limiting', () => {
+  test('returns 429 after exceeding 30 requests per minute', async () => {
+    const responses = await Promise.all(
+      Array.from({ length: 35 }, () => req('GET', '/api/v1/compliance/audits/export')),
+    );
+    const tooMany = responses.filter(r => r.status === 429);
+    assert.ok(tooMany.length >= 1, 'Expected at least one 429 response');
+    assert.equal(tooMany[0].body.success, false);
+    assert.match(tooMany[0].body.error, /Too many/);
   });
 });

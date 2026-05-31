@@ -761,6 +761,153 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
+  /api/v1/compliance/audits/export:
+    get:
+      tags: [compliance]
+      summary: Export audit history as CSV or JSON
+      description: |
+        Returns a downloadable file containing all audit records matching the
+        caller's org scope. Designed for compliance officers who need to attach
+        dated evidence snapshots to SOC2, ISO 27001, or DORA audit packages.
+
+        **Format:** Use `?format=csv` (default) for a standard CSV file or
+        `?format=json` for a JSON array. Both contain the same fields:
+        `jobId`, `repository`, `tag`, `profile`, `verdict`, `submittedAt`,
+        `completedAt`.
+
+        **Authentication (enforcement mode):** When `LICENSE_SECRET` is set or
+        the organization registry is non-empty, a valid
+        `Authorization: Bearer <session-token|license-key>` header is required.
+        In development / free-tier mode (neither active) the endpoint is open.
+
+        **Org scope (enforcement mode):** When the authenticated token carries
+        an `orgId` (registry-enforced multi-tenant mode), only records whose
+        repository owner matches the authenticated organization are exported.
+        Single-tenant `LICENSE_SECRET` mode exports all records.
+
+        **Filtering:** Use `?repository=owner/repo` (exact match), `?from=` and
+        `?to=` (ISO 8601 dates) to restrict records. Filters are applied on top
+        of the org-scope filter, not instead of it.
+
+        **Rate limit:** 30 requests per minute per IP.
+      operationId: exportAudits
+      security:
+        - BearerAuth: []
+        - {}  # security is optional — open in dev/free-tier mode
+      parameters:
+        - name: format
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [csv, json]
+            default: csv
+          description: Export format — `csv` (default) or `json`
+          example: csv
+        - name: repository
+          in: query
+          required: false
+          schema:
+            type: string
+          description: |
+            Filter by repository in `owner/repo` format (exact match).
+            Applied before org-scope filter, not instead of it.
+          example: "acme/widgets"
+        - name: from
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+          description: |
+            Inclusive lower bound on `submittedAt` (ISO 8601). Records submitted
+            before this date are excluded.
+          example: "2026-01-01T00:00:00Z"
+        - name: to
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+          description: |
+            Inclusive upper bound on `submittedAt` (ISO 8601). Records submitted
+            after this date are excluded.
+          example: "2026-12-31T23:59:59Z"
+      responses:
+        "200":
+          description: Export file returned
+          content:
+            text/csv:
+              schema:
+                type: string
+                description: |
+                  CSV file with columns: `jobId, repository, tag, profile,
+                  verdict, submittedAt, completedAt`. Header row is always present
+                  even when there are no records.
+            application/json:
+              schema:
+                type: array
+                description: JSON array of audit records (same fields as CSV)
+                items:
+                  type: object
+                  required: [jobId, repository, tag, profile, verdict, submittedAt, completedAt]
+                  properties:
+                    jobId:
+                      type: string
+                      example: "audit-acme_widgets-v1.2.0-1748692800000"
+                    repository:
+                      type: string
+                      example: "acme/widgets"
+                    tag:
+                      type: string
+                      example: "v1.2.0"
+                    profile:
+                      type: string
+                      enum: [default, iso27001, soc2, dora]
+                      example: "iso27001"
+                    verdict:
+                      type: string
+                      enum: [approved, conditional, blocked, ""]
+                      example: "approved"
+                    submittedAt:
+                      type: string
+                      format: date-time
+                      example: "2026-05-31T12:00:00.000Z"
+                    completedAt:
+                      type: string
+                      format: date-time
+                      example: "2026-05-31T12:00:01.234Z"
+        "400":
+          description: Invalid `format`, `from`, or `to` query parameter
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "401":
+          description: Missing or invalid Authorization header (enforcement mode only)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "403":
+          description: Organization not registered or evicted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "429":
+          description: Rate limit exceeded (30 requests per minute per IP)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
   /admin/orgs:
     post:
       tags: [admin]

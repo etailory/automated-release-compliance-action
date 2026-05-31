@@ -5,10 +5,11 @@
  * GitHub Action (premium tier) and future web application clients.
  *
  * Endpoints (v1):
- *   POST /api/v1/compliance/verify         — Validate OIDC token and issue session token
- *   POST /api/v1/compliance/audit          — Receive repository metadata and run audit
- *   GET  /api/v1/compliance/audit/:jobId   — Retrieve audit job status and result
- *   GET  /api/v1/compliance/audits         — List org audit history from durable log
+ *   POST /api/v1/compliance/verify          — Validate OIDC token and issue session token
+ *   POST /api/v1/compliance/audit           — Receive repository metadata and run audit
+ *   GET  /api/v1/compliance/audit/:jobId    — Retrieve audit job status and result
+ *   GET  /api/v1/compliance/audits          — List org audit history from durable log
+ *   GET  /api/v1/compliance/audits/export   — Export org audit history as CSV or JSON
  */
 
 import crypto from 'node:crypto';
@@ -384,10 +385,11 @@ function getSessionSecret() {
 // Rate limiters — exported so tests can reset stores between runs
 // ---------------------------------------------------------------------------
 
-export const _auditLimiterStore       = new MemoryStore();
-export const _verifyLimiterStore      = new MemoryStore();
-export const _getAuditLimiterStore    = new MemoryStore();
-export const _listAuditsLimiterStore  = new MemoryStore();
+export const _auditLimiterStore        = new MemoryStore();
+export const _verifyLimiterStore       = new MemoryStore();
+export const _getAuditLimiterStore     = new MemoryStore();
+export const _listAuditsLimiterStore   = new MemoryStore();
+export const _exportAuditsLimiterStore = new MemoryStore();
 
 const auditLimiter = rateLimit({
   windowMs:       60_000,
@@ -420,6 +422,15 @@ const listAuditsLimiter = rateLimit({
   windowMs:       60_000,
   max:            30,
   store:          _listAuditsLimiterStore,
+  standardHeaders: true,
+  legacyHeaders:  false,
+  message: { success: false, error: 'Too many requests. Please retry after 1 minute.' },
+});
+
+const exportAuditsLimiter = rateLimit({
+  windowMs:       60_000,
+  max:            30,
+  store:          _exportAuditsLimiterStore,
   standardHeaders: true,
   legacyHeaders:  false,
   message: { success: false, error: 'Too many requests. Please retry after 1 minute.' },
@@ -805,6 +816,172 @@ app.get('/api/v1/compliance/audits', listAuditsLimiter, async (req, res) => {
   } catch (error) {
     console.error('[GET /api/v1/compliance/audits] Error:', error);
     return res.status(500).json({ success: false, error: 'Internal server error listing audit history.' });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/compliance/audits/export
+//
+// Returns a downloadable file of all audit records matching the caller's org
+// scope. Supports CSV (default) and JSON formats via ?format=csv|json.
+//
+// Query params:
+//   format     — 'csv' (default) or 'json'
+//   repository — exact-match repository filter (e.g. 'acme/widgets')
+//   from       — ISO 8601 date lower bound on submittedAt (inclusive)
+//   to         — ISO 8601 date upper bound on submittedAt (inclusive)
+//
+// Same auth rules and rate limit (30 req/min) as GET /api/v1/compliance/audits.
+// ---------------------------------------------------------------------------
+
+/**
+ * Escape a value for inclusion in a CSV field.
+ * Wraps in double-quotes when the value contains commas, quotes, or newlines.
+ *
+ * @param {unknown} value
+ * @returns {string}
+ */
+function escapeCsvField(value) {
+  const str = String(value ?? '');
+  if (str.includes(',') || str.includes('"') || str.includes('\n') || str.includes('\r')) {
+    return '"' + str.replace(/"/g, '""') + '"';
+  }
+  return str;
+}
+
+app.get('/api/v1/compliance/audits/export', exportAuditsLimiter, async (req, res) => {
+  try {
+    // Auth — identical to GET /api/v1/compliance/audits
+    let authResult = null;
+    if (process.env.LICENSE_SECRET || isRegistryEnforced()) {
+      const authHeader  = req.headers['authorization'] ?? '';
+      const bearerToken = authHeader.startsWith('Bearer ')
+        ? authHeader.slice('Bearer '.length).trim()
+        : '';
+
+      if (!bearerToken) {
+        return res.status(401).json({
+          success: false,
+          error:   'Missing or invalid Authorization header. Expected: Bearer <license-key|session-token>',
+        });
+      }
+
+      authResult = await authenticateBearerToken(bearerToken);
+      if (!authResult.valid) {
+        return res.status(401).json({ success: false, error: 'Invalid authorization token.' });
+      }
+
+      if (isRegistryEnforced() && authResult.orgId) {
+        if (!orgRegistry.has(authResult.orgId)) {
+          return res.status(403).json({
+            success: false,
+            error:   `Organization '${authResult.orgId}' is not registered or has been evicted.`,
+          });
+        }
+      }
+    }
+
+    // Validate ?format (default: csv)
+    const format = req.query.format ?? 'csv';
+    if (format !== 'csv' && format !== 'json') {
+      return res.status(400).json({
+        success: false,
+        error:   'Invalid format: must be "csv" or "json".',
+      });
+    }
+
+    // Parse ?repository filter
+    const repository = (typeof req.query.repository === 'string' && req.query.repository)
+      ? req.query.repository
+      : null;
+
+    // Parse ?from and ?to date bounds
+    let from = null;
+    let to   = null;
+    if (req.query.from !== undefined) {
+      const d = new Date(req.query.from);
+      if (isNaN(d.getTime())) {
+        return res.status(400).json({
+          success: false,
+          error:   'Invalid from date: must be an ISO 8601 date string.',
+        });
+      }
+      from = d;
+    }
+    if (req.query.to !== undefined) {
+      const d = new Date(req.query.to);
+      if (isNaN(d.getTime())) {
+        return res.status(400).json({
+          success: false,
+          error:   'Invalid to date: must be an ISO 8601 date string.',
+        });
+      }
+      to = d;
+    }
+
+    // Org scope
+    const orgId = (isRegistryEnforced() && authResult?.orgId) ? authResult.orgId : null;
+
+    // Fetch all matching records (no pagination for exports)
+    const { records: allRecords } = await _findJobsInAuditLog({
+      orgId,
+      limit:      Number.MAX_SAFE_INTEGER,
+      offset:     0,
+      repository,
+    });
+
+    // Apply date range filter on submittedAt
+    const records = (from === null && to === null)
+      ? allRecords
+      : allRecords.filter(r => {
+          const ts = r.submittedAt ? new Date(r.submittedAt) : null;
+          if (!ts || isNaN(ts.getTime())) return true;
+          if (from !== null && ts < from) return false;
+          if (to   !== null && ts > to)   return false;
+          return true;
+        });
+
+    // Date string for the filename (YYYY-MM-DD in UTC)
+    const dateStr = new Date().toISOString().slice(0, 10);
+
+    if (format === 'json') {
+      const exportRows = records.map(r => ({
+        jobId:       r.jobId                              ?? '',
+        repository:  r.repository                         ?? '',
+        tag:         r.tag                                ?? '',
+        profile:     r.result?.profile                    ?? '',
+        verdict:     r.result?.governanceVerdict?.verdict ?? '',
+        submittedAt: r.submittedAt                        ?? '',
+        completedAt: r.completedAt                        ?? '',
+      }));
+      res.setHeader('Content-Type', 'application/json; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="audit-export-${dateStr}.json"`);
+      return res.status(200).json(exportRows);
+    }
+
+    // CSV
+    const CSV_COLS = ['jobId', 'repository', 'tag', 'profile', 'verdict', 'submittedAt', 'completedAt'];
+    const csvLines = [CSV_COLS.join(',')];
+    for (const r of records) {
+      csvLines.push([
+        escapeCsvField(r.jobId),
+        escapeCsvField(r.repository),
+        escapeCsvField(r.tag),
+        escapeCsvField(r.result?.profile                    ?? ''),
+        escapeCsvField(r.result?.governanceVerdict?.verdict ?? ''),
+        escapeCsvField(r.submittedAt),
+        escapeCsvField(r.completedAt),
+      ].join(','));
+    }
+    const csvBody = csvLines.join('\n') + '\n';
+
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="audit-export-${dateStr}.csv"`);
+    return res.status(200).send(csvBody);
+
+  } catch (error) {
+    console.error('[GET /api/v1/compliance/audits/export] Error:', error);
+    return res.status(500).json({ success: false, error: 'Internal server error exporting audit history.' });
   }
 });
 
