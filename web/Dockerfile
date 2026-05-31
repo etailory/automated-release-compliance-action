@@ -1,11 +1,11 @@
 # ── Stage 1: dependencies ──────────────────────────────────────────────────────
-FROM node:20-alpine AS deps
+FROM node:22-alpine AS deps
 WORKDIR /app
 COPY package.json ./
 RUN npm install --omit=dev --ignore-scripts
 
 # ── Stage 2: production image ──────────────────────────────────────────────────
-FROM node:20-alpine AS runner
+FROM node:22-alpine AS runner
 WORKDIR /app
 
 # Create a non-root user

@@ -99,22 +99,27 @@ a release was checked against the checklist at publish time.
 The premium tier requires a running instance of the Governor OS web server. Use
 Docker or Compose to self-host it alongside your GitHub Actions workflow.
 
-### Quick start with Docker
+### Quick-start (Docker Compose)
+
+Two commands from the repo root:
+
+```bash
+cp .env.example .env          # fill in SESSION_SECRET, ADMIN_SECRET, LICENSE_SECRET
+docker compose up -d
+# Verify: curl http://localhost:3000/health
+# → {"status":"ok","service":"governor-os-web","version":"1.0.0"}
+```
+
+The `docker-compose.yml` at the repo root builds the `web/` image, mounts a
+`./data` volume so the org registry and audit log survive restarts, and
+documents every environment variable as commented stubs.
+
+### Build the image manually
 
 ```bash
 cd web
 docker build -t governor-os-web .
 docker run --rm -p 3000:3000 governor-os-web
-# Verify: curl http://localhost:3000/health
-# → {"status":"ok","service":"governor-os-web","version":"1.0.0"}
-```
-
-### Docker Compose (recommended for local development)
-
-```bash
-cd web
-cp .env.example .env          # fill in LICENSE_SECRET and any other vars
-docker compose up --build
 ```
 
 The server starts on `http://localhost:3000`. Set `COMPLIANCE_BACKEND_URL` in
@@ -136,11 +141,15 @@ this container:
 | Variable | Default | Description |
 | --- | --- | --- |
 | `PORT` | `3000` | HTTP port the server binds to |
-| `LICENSE_SECRET` | — | The license key that the server accepts from the action. Set this to the same value you place in `secrets.GOVERNOR_LICENSE_KEY`. The server validates incoming `Authorization: Bearer <key>` headers against this value using a timing-safe comparison. When unset, the server accepts **any** non-empty key (development mode only — always set this in production). |
+| `SESSION_SECRET` | — | HMAC secret for signing session tokens. Required in production. Generate: `openssl rand -hex 32`. |
+| `ADMIN_SECRET` | — | Protects the `/admin/orgs` endpoints. When unset all admin endpoints return 503. Generate: `openssl rand -hex 32`. |
+| `LICENSE_SECRET` | — | The license key the server accepts from the action (`Authorization: Bearer <key>`). When unset, any non-empty key is accepted (dev mode only). |
+| `ORGS_FILE` | `data/orgs.json` | Path inside the container to the org registry JSON file. |
+| `AUDIT_LOG_FILE` | `data/audit-log.ndjson` | Path inside the container to the durable audit log. |
 | `DATABASE_URL` | — | PostgreSQL connection string (future) |
 | `GITHUB_OIDC_JWKS_URL` | GitHub default | Override for GitHub Enterprise |
 
-Copy `web/.env.example` to `web/.env` and fill in secrets. Never commit `.env`.
+Copy `.env.example` to `.env` and fill in secrets. Never commit `.env`.
 
 ---
 
