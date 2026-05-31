@@ -22894,8 +22894,12 @@ function getRulesForProfile(profile) {
       return SOC2_RULES;
     case "dora":
       return DORA_RULES;
-    default:
+    case "default":
       return DEFAULT_RULES;
+    default: {
+      const _exhaustive = profile;
+      throw new Error(`Unknown compliance profile: "${_exhaustive}"`);
+    }
   }
 }
 function countWords(text) {
@@ -23205,6 +23209,10 @@ async function run() {
     const licenseKey = core.getInput("license-key");
     const failOnIncomplete = core.getBooleanInput("fail-on-incomplete");
     const rawProfile = core.getInput("compliance-profile").trim().toLowerCase();
+    if (rawProfile && !VALID_PROFILES.includes(rawProfile)) {
+      core.setFailed(`Unknown compliance-profile "${rawProfile}". Valid values: ${VALID_PROFILES.join(", ")}.`);
+      return;
+    }
     const profile = VALID_PROFILES.includes(rawProfile) ? rawProfile : "default";
     const reportPath = core.getInput("report-path");
     const context2 = github.context;

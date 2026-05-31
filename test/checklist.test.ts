@@ -258,6 +258,12 @@ test("soc2 profile: has-testing-evidence carries controlRef CC8.1", () => {
   expect(check?.controlRef).toBe("CC8.1");
 });
 
+test("getRulesForProfile throws for an unrecognised profile string", () => {
+  expect(() => getRulesForProfile("general" as ComplianceProfile)).toThrow(
+    'Unknown compliance profile: "general"'
+  );
+});
+
 test("dora profile: has-risk-impact carries controlRef Art.9", () => {
   const rules = getRulesForProfile("dora");
   const result = evaluateChecklist(FULL_RELEASE_BODY, {}, rules);

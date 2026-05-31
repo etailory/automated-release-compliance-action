@@ -134,7 +134,7 @@ a release was checked against the checklist at publish time.
 | Input | Required | Description |
 | --- | --- | --- |
 | `github-token` | yes | Token used to read release/repository context. |
-| `compliance-profile` | no | Compliance framework: `iso27001`, `soc2`, `dora`, or `general` (default). |
+| `compliance-profile` | no | Compliance framework: `default`, `iso27001`, `soc2`, or `dora`. Defaults to `default`. An unrecognised value fails the workflow. |
 | `report-path` | no | Path to write the JSON compliance report. Omit to skip. |
 | `fail-on-incomplete` | no | Fail the job if the checklist does not pass (default `false`). |
 | `license-key` | no | Enables the premium audit bridge (requires `COMPLIANCE_BACKEND_URL`). |

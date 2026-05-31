@@ -94,6 +94,12 @@ export async function run(): Promise<void> {
     const licenseKey = core.getInput("license-key");
     const failOnIncomplete = core.getBooleanInput("fail-on-incomplete");
     const rawProfile = core.getInput("compliance-profile").trim().toLowerCase();
+    if (rawProfile && !(VALID_PROFILES as string[]).includes(rawProfile)) {
+      core.setFailed(
+        `Unknown compliance-profile "${rawProfile}". Valid values: ${VALID_PROFILES.join(", ")}.`
+      );
+      return;
+    }
     const profile: ComplianceProfile = (VALID_PROFILES as string[]).includes(rawProfile)
       ? (rawProfile as ComplianceProfile)
       : "default";

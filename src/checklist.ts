@@ -114,7 +114,13 @@ export function getRulesForProfile(profile: ComplianceProfile): CheckRule[] {
     case "iso27001": return ISO27001_RULES;
     case "soc2":     return SOC2_RULES;
     case "dora":     return DORA_RULES;
-    default:         return DEFAULT_RULES;
+    case "default":  return DEFAULT_RULES;
+    default: {
+      // Runtime guard: unreachable with a valid ComplianceProfile, but throws
+      // descriptively when called from JavaScript or with an unsafe cast.
+      const _exhaustive: never = profile;
+      throw new Error(`Unknown compliance profile: "${_exhaustive}"`);
+    }
   }
 }
 
