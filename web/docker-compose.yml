@@ -9,6 +9,8 @@ services:
       - .env.example
     environment:
       - NODE_ENV=development
+    volumes:
+      - ./data:/app/data
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]

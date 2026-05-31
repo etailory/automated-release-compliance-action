@@ -15,6 +15,9 @@ RUN addgroup -S appgroup && adduser -S appuser -G appgroup
 COPY --from=deps /app/node_modules ./node_modules
 COPY package.json server.js ./
 
+# Create data directory and ensure the non-root user can write to it
+RUN mkdir -p /app/data && chown appuser:appgroup /app/data
+
 # Drop to non-root
 USER appuser
 

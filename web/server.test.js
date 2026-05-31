@@ -10,6 +10,9 @@
 import { test, describe, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
+import { mkdtemp, rm, readFile, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { generateKeyPair, exportJWK, SignJWT } from 'jose';
 import {
   app,
@@ -20,6 +23,9 @@ import {
   _auditLimiterStore,
   _verifyLimiterStore,
   _resetJwksCache,
+  _loadOrgsFromFile,
+  _flushOrgsToFile,
+  _loadOrgsFromEnv,
 } from './server.js';
 
 // ---------------------------------------------------------------------------
@@ -28,6 +34,10 @@ import {
 
 let server;
 let baseUrl;
+
+// Shared temp directory for all test file I/O — cleaned up in after()
+let testDataDir;
+let testFileCounter = 0;
 
 // OIDC test state — populated in before()
 let testPrivateKey;       // RSA private key for signing test JWTs
@@ -38,6 +48,9 @@ let mockJwksPort;
 let mockJwksMode = 'ok';  // 'ok' | 'error' — controls mock server response
 
 before(async () => {
+  // Create a shared temp directory for file persistence tests
+  testDataDir = await mkdtemp(join(tmpdir(), 'govos-test-'));
+
   // Start the app server
   await new Promise((resolve) => {
     server = app.listen(0, '127.0.0.1', () => {
@@ -86,6 +99,7 @@ after(async () => {
   await new Promise((resolve, reject) => {
     mockJwksServer.close((err) => (err ? reject(err) : resolve()));
   });
+  await rm(testDataDir, { recursive: true, force: true });
 });
 
 beforeEach(async () => {
@@ -101,6 +115,10 @@ beforeEach(async () => {
   delete process.env.LICENSE_SECRET;
   delete process.env.ADMIN_SECRET;
   delete process.env.ORGS_CONFIG;
+  // Point file persistence to isolated per-test paths under the shared temp dir
+  const id = ++testFileCounter;
+  process.env.ORGS_FILE      = join(testDataDir, `orgs-${id}.json`);
+  process.env.AUDIT_LOG_FILE = join(testDataDir, `audit-log-${id}.ndjson`);
   // Set OIDC env vars and reset JWKS cache for every test
   process.env.JWKS_URL      = `http://127.0.0.1:${mockJwksPort}/.well-known/jwks`;
   process.env.OIDC_ISSUER   = 'https://token.actions.githubusercontent.com';
@@ -813,6 +831,138 @@ describe('POST /admin/orgs', () => {
     );
     assert.equal(status, 400);
     assert.equal(body.success, false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// File persistence
+// ---------------------------------------------------------------------------
+
+describe('File persistence — org registry', () => {
+  test('graceful startup when ORGS_FILE does not exist', async () => {
+    // ORGS_FILE points to a non-existent path — _loadOrgsFromFile must not throw
+    await assert.doesNotReject(() => _loadOrgsFromFile());
+    // Registry stays empty when no file exists
+    assert.equal(orgRegistry.size, 0);
+  });
+
+  test('org registry loaded from ORGS_FILE on startup', async () => {
+    const orgsData = [
+      { id: 'file-org', licenseKey: 'lk-file', allowedSubs: ['repo:file-org/*'] },
+    ];
+    await writeFile(process.env.ORGS_FILE, JSON.stringify(orgsData), 'utf8');
+
+    orgRegistry.clear();
+    await _loadOrgsFromFile();
+
+    assert.ok(orgRegistry.has('file-org'));
+    const entry = orgRegistry.get('file-org');
+    assert.equal(entry.licenseKey, 'lk-file');
+    assert.deepEqual(entry.allowedSubs, ['repo:file-org/*']);
+  });
+
+  test('env-seeded entries (ORGS_CONFIG) take precedence over file entries on conflict', async () => {
+    // File has an org with one licenseKey
+    const orgsData = [
+      { id: 'shared-org', licenseKey: 'lk-from-file', allowedSubs: ['repo:shared/*'] },
+    ];
+    await writeFile(process.env.ORGS_FILE, JSON.stringify(orgsData), 'utf8');
+
+    // Env has the same org with a different licenseKey
+    process.env.ORGS_CONFIG = JSON.stringify([
+      { id: 'shared-org', licenseKey: 'lk-from-env', allowedSubs: ['repo:shared/*'] },
+    ]);
+
+    orgRegistry.clear();
+    await _loadOrgsFromFile();  // sets file entries
+    _loadOrgsFromEnv();          // env entries override conflicting file entries
+
+    // env key wins
+    assert.equal(orgRegistry.get('shared-org')?.licenseKey, 'lk-from-env');
+    delete process.env.ORGS_CONFIG;
+  });
+
+  test('org persisted to disk immediately after POST /admin/orgs', async () => {
+    process.env.ADMIN_SECRET = 'admin-secret';
+    const { status, body } = await req(
+      'POST', '/admin/orgs',
+      { id: 'persist-org', licenseKey: 'lk-persist', allowedSubs: ['repo:persist/*'] },
+      { Authorization: 'Bearer admin-secret' }
+    );
+    assert.equal(status, 200);
+    assert.equal(body.success, true);
+
+    const raw  = await readFile(process.env.ORGS_FILE, 'utf8');
+    const orgs = JSON.parse(raw);
+    assert.ok(Array.isArray(orgs));
+    const org = orgs.find(o => o.id === 'persist-org');
+    assert.ok(org, 'org must be present in the persisted file');
+    assert.equal(org.licenseKey, 'lk-persist');
+    assert.deepEqual(org.allowedSubs, ['repo:persist/*']);
+  });
+
+  test('_flushOrgsToFile writes all registry entries atomically', async () => {
+    orgRegistry.set('org-a', { licenseKey: 'lk-a', allowedSubs: ['repo:a/*'] });
+    orgRegistry.set('org-b', { licenseKey: 'lk-b', allowedSubs: ['repo:b/*'] });
+
+    await _flushOrgsToFile();
+
+    const raw  = await readFile(process.env.ORGS_FILE, 'utf8');
+    const orgs = JSON.parse(raw);
+    assert.equal(orgs.length, 2);
+    assert.ok(orgs.find(o => o.id === 'org-a'));
+    assert.ok(orgs.find(o => o.id === 'org-b'));
+  });
+});
+
+describe('File persistence — audit log', () => {
+  const AUTH = { Authorization: 'Bearer test-key' };
+
+  test('graceful startup when AUDIT_LOG_FILE does not exist', async () => {
+    // GET on an unknown job must not throw even when log file is absent
+    const { status } = await req('GET', '/api/v1/compliance/audit/nonexistent-id');
+    assert.equal(status, 404);
+  });
+
+  test('completed audit job is appended to AUDIT_LOG_FILE', async () => {
+    const { body: post } = await req('POST', '/api/v1/compliance/audit', VALID_AUDIT_PAYLOAD, AUTH);
+    const jobId = post.jobId;
+
+    const content = await readFile(process.env.AUDIT_LOG_FILE, 'utf8');
+    const lines   = content.split('\n').filter(Boolean);
+    assert.equal(lines.length, 1);
+    const record = JSON.parse(lines[0]);
+    assert.equal(record.jobId, jobId);
+    assert.equal(record.status, 'complete');
+    assert.equal(record.repository, 'acme/widgets');
+  });
+
+  test('audit job retrievable from NDJSON log after in-memory store is cleared', async () => {
+    const { body: post } = await req('POST', '/api/v1/compliance/audit', VALID_AUDIT_PAYLOAD, AUTH);
+    const jobId = post.jobId;
+
+    // Simulate a server restart by clearing the in-memory store
+    auditJobs.clear();
+    evictedJobIds.clear();
+
+    const { status, body } = await req('GET', `/api/v1/compliance/audit/${jobId}`);
+    assert.equal(status, 200);
+    assert.equal(body.success, true);
+    assert.equal(body.status, 'complete');
+    assert.equal(body.jobId, jobId);
+    assert.ok(body.result);
+    assert.equal(body.result.repository, 'acme/widgets');
+  });
+
+  test('multiple jobs are each appended as separate NDJSON lines', async () => {
+    await req('POST', '/api/v1/compliance/audit', VALID_AUDIT_PAYLOAD, AUTH);
+    await req('POST', '/api/v1/compliance/audit', VALID_AUDIT_PAYLOAD, AUTH);
+
+    const content = await readFile(process.env.AUDIT_LOG_FILE, 'utf8');
+    const lines   = content.split('\n').filter(Boolean);
+    assert.equal(lines.length, 2);
+    const ids = lines.map(l => JSON.parse(l).jobId);
+    assert.notEqual(ids[0], ids[1], 'Each job must have a unique ID');
   });
 });
 

@@ -11,6 +11,8 @@
  */
 
 import crypto from 'node:crypto';
+import fs from 'node:fs/promises';
+import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import express from 'express';
 import rateLimit, { MemoryStore } from 'express-rate-limit';
@@ -114,8 +116,6 @@ export function _loadOrgsFromEnv() {
   }
 }
 
-_loadOrgsFromEnv();
-
 /** Returns true when the registry has at least one org (enforcement mode). */
 function isRegistryEnforced() {
   return orgRegistry.size > 0;
@@ -145,6 +145,139 @@ function matchSubPattern(subject, pattern) {
  */
 function matchesAnyPattern(subject, patterns) {
   return patterns.some(p => matchSubPattern(subject, p));
+}
+
+// ---------------------------------------------------------------------------
+// File persistence layer
+//
+// ORGS_FILE      — path for the org registry JSON (default: data/orgs.json)
+// AUDIT_LOG_FILE — path for the completed-job NDJSON log (default: data/audit-log.ndjson)
+//
+// Writes are atomic (temp-file + rename for the registry; appendFile for the log).
+// File I/O errors are caught and logged; the in-memory store remains authoritative.
+// ---------------------------------------------------------------------------
+
+function getOrgsFilePath() {
+  return process.env.ORGS_FILE ?? 'data/orgs.json';
+}
+
+function getAuditLogFilePath() {
+  return process.env.AUDIT_LOG_FILE ?? 'data/audit-log.ndjson';
+}
+
+async function ensureDirFor(filePath) {
+  await fs.mkdir(path.dirname(path.resolve(filePath)), { recursive: true });
+}
+
+/**
+ * Load the org registry from the ORGS_FILE JSON file.
+ * Silently ignores ENOENT — the file is created on the first flush.
+ * Exported so tests and the startup block can invoke it directly.
+ *
+ * Caller is responsible for calling _loadOrgsFromEnv() afterwards so that
+ * env-seeded entries override any conflicting file entries.
+ */
+export async function _loadOrgsFromFile() {
+  const filePath = getOrgsFilePath();
+  try {
+    await ensureDirFor(filePath);
+    const raw = await fs.readFile(filePath, 'utf8');
+    const orgs = JSON.parse(raw);
+    if (!Array.isArray(orgs)) return;
+    let count = 0;
+    for (const org of orgs) {
+      if (
+        typeof org.id === 'string' && org.id &&
+        typeof org.licenseKey === 'string' && org.licenseKey &&
+        Array.isArray(org.allowedSubs)
+      ) {
+        orgRegistry.set(org.id, { licenseKey: org.licenseKey, allowedSubs: org.allowedSubs });
+        count++;
+      }
+    }
+    if (count > 0) {
+      console.log(`[orgRegistry] Loaded ${count} org(s) from ${filePath}.`);
+    }
+  } catch (err) {
+    if (err.code !== 'ENOENT') {
+      console.error(`[WARN] Could not load org registry from ${filePath}:`, err.message);
+    }
+    // ENOENT → file doesn't exist yet; ensureDirFor already created the directory.
+  }
+}
+
+/**
+ * Atomically flush the current org registry to ORGS_FILE.
+ * Writes to a .tmp file first, then renames, to prevent torn writes.
+ * Exported so tests can invoke it directly to set up state.
+ */
+export async function _flushOrgsToFile() {
+  const filePath = getOrgsFilePath();
+  const tmpPath  = `${filePath}.tmp`;
+  const orgs     = [];
+  for (const [id, entry] of orgRegistry) {
+    orgs.push({ id, licenseKey: entry.licenseKey, allowedSubs: entry.allowedSubs });
+  }
+  try {
+    await ensureDirFor(filePath);
+    await fs.writeFile(tmpPath, JSON.stringify(orgs, null, 2), 'utf8');
+    await fs.rename(tmpPath, filePath);
+  } catch (err) {
+    console.error(`[WARN] Failed to flush org registry to ${filePath}:`, err.message);
+    try { await fs.unlink(tmpPath); } catch { /* ignore cleanup error */ }
+  }
+}
+
+/**
+ * Append a completed audit job record to the NDJSON audit log.
+ * Errors are caught and logged; the in-memory store is the primary read path.
+ *
+ * @param {string}   jobId
+ * @param {AuditJob} job
+ */
+async function _appendJobToAuditLog(jobId, job) {
+  const filePath = getAuditLogFilePath();
+  try {
+    await ensureDirFor(filePath);
+    const record = {
+      jobId,
+      status:      job.status,
+      submittedAt: job.submittedAt,
+      completedAt: job.completedAt,
+      repository:  job.repository,
+      tag:         job.tag,
+      result:      job.result,
+    };
+    await fs.appendFile(filePath, JSON.stringify(record) + '\n', 'utf8');
+  } catch (err) {
+    console.error(`[WARN] Failed to append job ${jobId} to audit log:`, err.message);
+  }
+}
+
+/**
+ * Scan the NDJSON audit log for a record matching jobId.
+ * Returns the record object or null if not found.
+ *
+ * @param {string} jobId
+ * @returns {Promise<object|null>}
+ */
+async function _findJobInAuditLog(jobId) {
+  const filePath = getAuditLogFilePath();
+  try {
+    const content = await fs.readFile(filePath, 'utf8');
+    for (const line of content.split('\n')) {
+      if (!line.trim()) continue;
+      try {
+        const record = JSON.parse(line);
+        if (record.jobId === jobId) return record;
+      } catch { /* skip malformed lines */ }
+    }
+  } catch (err) {
+    if (err.code !== 'ENOENT') {
+      console.error(`[WARN] Failed to scan audit log ${filePath}:`, err.message);
+    }
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -445,7 +578,7 @@ app.get('/api/v1/compliance/audit/:jobId', async (req, res) => {
 // Expected request body: { id, licenseKey, allowedSubs }
 // ---------------------------------------------------------------------------
 
-app.post('/admin/orgs', (req, res) => {
+app.post('/admin/orgs', async (req, res) => {
   const adminSecret = process.env.ADMIN_SECRET;
   if (!adminSecret) {
     return res.status(503).json({
@@ -486,6 +619,7 @@ app.post('/admin/orgs', (req, res) => {
   }
 
   orgRegistry.set(id, { licenseKey, allowedSubs });
+  await _flushOrgsToFile();
   console.log(`[/admin/orgs] Registered org: ${id}`);
   return res.status(200).json({ success: true, message: `Organization '${id}' registered.` });
 });
@@ -666,6 +800,8 @@ async function enqueueAuditJob({ authToken, repository, release, requested }) {
     result,
   });
 
+  await _appendJobToAuditLog(jobId, auditJobs.get(jobId));
+
   console.log(`[enqueueAuditJob] Processed: ${jobId} → verdict: ${governance.verdict} (auth prefix: ${authToken.slice(0, 8)}...)`);
   return { jobId };
 }
@@ -678,15 +814,29 @@ async function enqueueAuditJob({ authToken, repository, release, requested }) {
  */
 async function getAuditJobStatus(jobId) {
   const job = auditJobs.get(jobId);
-  if (!job) return null;
+  if (job) {
+    return {
+      status:  job.status,
+      message: job.status === 'complete'
+        ? `Audit complete for ${job.repository}@${job.tag}.`
+        : 'Audit job is queued and awaiting processing.',
+      result: job.result,
+    };
+  }
 
-  return {
-    status:  job.status,
-    message: job.status === 'complete'
-      ? `Audit complete for ${job.repository}@${job.tag}.`
-      : 'Audit job is queued and awaiting processing.',
-    result: job.result,
-  };
+  // Fast path missed — scan the durable NDJSON log for jobs from prior process runs.
+  const record = await _findJobInAuditLog(jobId);
+  if (record) {
+    return {
+      status:  record.status,
+      message: record.status === 'complete'
+        ? `Audit complete for ${record.repository}@${record.tag}.`
+        : 'Audit job is queued and awaiting processing.',
+      result: record.result,
+    };
+  }
+
+  return null;
 }
 
 /**
@@ -758,6 +908,9 @@ async function verifyOidcAndIssueSession({ oidcToken, organizationId, federation
 
 const isMain = process.argv[1] === fileURLToPath(import.meta.url);
 if (isMain) {
+  // Load persisted orgs first, then overlay env-config entries (env takes precedence).
+  await _loadOrgsFromFile();
+  _loadOrgsFromEnv();
   app.listen(PORT, () => {
     console.log(`Governor OS Web Platform running on port ${PORT}`);
   });
