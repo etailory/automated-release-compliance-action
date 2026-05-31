@@ -23,10 +23,12 @@ import {
   _auditLimiterStore,
   _verifyLimiterStore,
   _getAuditLimiterStore,
+  _listAuditsLimiterStore,
   _resetJwksCache,
   _loadOrgsFromFile,
   _flushOrgsToFile,
   _loadOrgsFromEnv,
+  _findJobsInAuditLog,
 } from './server.js';
 
 // ---------------------------------------------------------------------------
@@ -113,6 +115,7 @@ beforeEach(async () => {
   await _auditLimiterStore.resetAll?.();
   await _verifyLimiterStore.resetAll?.();
   await _getAuditLimiterStore.resetAll?.();
+  await _listAuditsLimiterStore.resetAll?.();
   // Ensure sensitive env vars are unset by default
   delete process.env.LICENSE_SECRET;
   delete process.env.ADMIN_SECRET;
@@ -1558,5 +1561,311 @@ describe('validateLicenseKey', () => {
     process.env.LICENSE_SECRET = 'short';
     assert.equal(validateLicenseKey('a-much-longer-key-that-does-not-match'), false);
     delete process.env.LICENSE_SECRET;
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/compliance/audits — dev mode (open)
+// ---------------------------------------------------------------------------
+
+describe('GET /api/v1/compliance/audits — dev mode', () => {
+  const AUTH = { Authorization: 'Bearer test-key' };
+
+  test('returns 200 with empty list when no jobs have been submitted', async () => {
+    const { status, body } = await req('GET', '/api/v1/compliance/audits');
+    assert.equal(status, 200);
+    assert.equal(body.success, true);
+    assert.deepEqual(body.jobs, []);
+    assert.equal(body.count, 0);
+  });
+
+  test('returns 200 with submitted jobs from the audit log', async () => {
+    await req('POST', '/api/v1/compliance/audit', VALID_AUDIT_PAYLOAD, AUTH);
+    const { status, body } = await req('GET', '/api/v1/compliance/audits');
+    assert.equal(status, 200);
+    assert.equal(body.success, true);
+    assert.equal(body.jobs.length, 1);
+    assert.equal(body.count, 1);
+    assert.equal(body.jobs[0].repository, 'acme/widgets');
+  });
+
+  test('returns jobs sorted newest first', async () => {
+    const payload1 = { ...VALID_AUDIT_PAYLOAD, release: { ...VALID_AUDIT_PAYLOAD.release, tag: 'v1.0.0' } };
+    const payload2 = { ...VALID_AUDIT_PAYLOAD, release: { ...VALID_AUDIT_PAYLOAD.release, tag: 'v2.0.0' } };
+    await req('POST', '/api/v1/compliance/audit', payload1, AUTH);
+    await req('POST', '/api/v1/compliance/audit', payload2, AUTH);
+    const { body } = await req('GET', '/api/v1/compliance/audits');
+    assert.equal(body.jobs.length, 2);
+    // Newest first — submittedAt descending
+    assert.ok(body.jobs[0].submittedAt >= body.jobs[1].submittedAt,
+      'Jobs should be sorted newest first');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/compliance/audits — auth enforcement
+// ---------------------------------------------------------------------------
+
+describe('GET /api/v1/compliance/audits — auth', () => {
+  test('returns 401 when LICENSE_SECRET is set and Authorization is absent', async () => {
+    process.env.LICENSE_SECRET = 'secret-key';
+    const { status, body } = await req('GET', '/api/v1/compliance/audits');
+    assert.equal(status, 401);
+    assert.equal(body.success, false);
+  });
+
+  test('returns 401 when LICENSE_SECRET is set and token is invalid', async () => {
+    process.env.LICENSE_SECRET = 'secret-key';
+    const { status, body } = await req('GET', '/api/v1/compliance/audits', undefined, {
+      Authorization: 'Bearer wrong-key',
+    });
+    assert.equal(status, 401);
+    assert.equal(body.success, false);
+  });
+
+  test('returns 200 when LICENSE_SECRET is set and token matches', async () => {
+    process.env.LICENSE_SECRET = 'secret-key';
+    const { status, body } = await req('GET', '/api/v1/compliance/audits', undefined, {
+      Authorization: 'Bearer secret-key',
+    });
+    assert.equal(status, 200);
+    assert.equal(body.success, true);
+  });
+
+  test('returns 401 when org registry is enforced and Authorization is absent', async () => {
+    orgRegistry.set('acme', { licenseKey: 'lk-acme', allowedSubs: ['repo:acme/*'] });
+    const { status, body } = await req('GET', '/api/v1/compliance/audits');
+    assert.equal(status, 401);
+    assert.equal(body.success, false);
+  });
+
+  test('returns 401 when org has been evicted from registry (license key no longer matches)', async () => {
+    orgRegistry.set('acme',  { licenseKey: 'lk-acme',  allowedSubs: ['repo:acme/*'] });
+    orgRegistry.set('other', { licenseKey: 'lk-other', allowedSubs: ['repo:other/*'] });
+
+    // Access works before eviction
+    const { status: beforeStatus } = await req('GET', '/api/v1/compliance/audits', undefined, {
+      Authorization: 'Bearer lk-acme',
+    });
+    assert.equal(beforeStatus, 200, 'Expected 200 before eviction');
+
+    // Evict acme (keep registry in enforcement mode via 'other')
+    orgRegistry.delete('acme');
+
+    const { status, body } = await req('GET', '/api/v1/compliance/audits', undefined, {
+      Authorization: 'Bearer lk-acme',
+    });
+    // License key is no longer recognised in any org → 401
+    assert.equal(status, 401);
+    assert.equal(body.success, false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/compliance/audits — org scope filtering
+// ---------------------------------------------------------------------------
+
+describe('GET /api/v1/compliance/audits — org scope', () => {
+  test('multi-tenant: only returns jobs for the authenticated org', async () => {
+    orgRegistry.set('acme',       { licenseKey: 'lk-acme',  allowedSubs: ['repo:acme/*'] });
+    orgRegistry.set('other-corp', { licenseKey: 'lk-other', allowedSubs: ['repo:other-corp/*'] });
+
+    // acme submits 2 jobs
+    const acmePayload = { ...VALID_AUDIT_PAYLOAD, repository: 'acme/widgets' };
+    await req('POST', '/api/v1/compliance/audit', acmePayload, { Authorization: 'Bearer lk-acme' });
+    await req('POST', '/api/v1/compliance/audit', acmePayload, { Authorization: 'Bearer lk-acme' });
+    // other-corp submits 1 job
+    const otherPayload = { ...VALID_AUDIT_PAYLOAD, repository: 'other-corp/widgets' };
+    await req('POST', '/api/v1/compliance/audit', otherPayload, { Authorization: 'Bearer lk-other' });
+
+    const { status, body } = await req('GET', '/api/v1/compliance/audits', undefined, {
+      Authorization: 'Bearer lk-acme',
+    });
+    assert.equal(status, 200);
+    assert.equal(body.jobs.length, 2, 'acme should see only its own 2 jobs');
+    for (const job of body.jobs) {
+      assert.equal(job.repository.split('/')[0], 'acme');
+    }
+  });
+
+  test('multi-tenant: org B cannot see org A jobs', async () => {
+    orgRegistry.set('acme',       { licenseKey: 'lk-acme',  allowedSubs: ['repo:acme/*'] });
+    orgRegistry.set('other-corp', { licenseKey: 'lk-other', allowedSubs: ['repo:other-corp/*'] });
+
+    const acmePayload = { ...VALID_AUDIT_PAYLOAD, repository: 'acme/widgets' };
+    await req('POST', '/api/v1/compliance/audit', acmePayload, { Authorization: 'Bearer lk-acme' });
+
+    const { status, body } = await req('GET', '/api/v1/compliance/audits', undefined, {
+      Authorization: 'Bearer lk-other',
+    });
+    assert.equal(status, 200);
+    assert.equal(body.jobs.length, 0, 'other-corp should see no acme jobs');
+  });
+
+  test('single-tenant LICENSE_SECRET mode returns all jobs', async () => {
+    process.env.LICENSE_SECRET = 'single-key';
+    const p1 = { ...VALID_AUDIT_PAYLOAD, repository: 'ownerA/repo1' };
+    const p2 = { ...VALID_AUDIT_PAYLOAD, repository: 'ownerB/repo2' };
+    await req('POST', '/api/v1/compliance/audit', p1, { Authorization: 'Bearer single-key' });
+    await req('POST', '/api/v1/compliance/audit', p2, { Authorization: 'Bearer single-key' });
+
+    const { status, body } = await req('GET', '/api/v1/compliance/audits', undefined, {
+      Authorization: 'Bearer single-key',
+    });
+    assert.equal(status, 200);
+    assert.equal(body.jobs.length, 2, 'single-tenant mode should return all jobs regardless of owner');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/compliance/audits — pagination (?limit)
+// ---------------------------------------------------------------------------
+
+describe('GET /api/v1/compliance/audits — pagination', () => {
+  const AUTH = { Authorization: 'Bearer test-key' };
+
+  test('default limit is 50 (returns at most 50 jobs)', async () => {
+    // Submit 3 jobs — under the default so all are returned
+    for (let i = 0; i < 3; i++) {
+      const p = { ...VALID_AUDIT_PAYLOAD, release: { ...VALID_AUDIT_PAYLOAD.release, tag: `v1.0.${i}` } };
+      await req('POST', '/api/v1/compliance/audit', p, AUTH);
+    }
+    const { status, body } = await req('GET', '/api/v1/compliance/audits', undefined, AUTH);
+    assert.equal(status, 200);
+    assert.equal(body.jobs.length, 3);
+  });
+
+  test('?limit=1 returns only the newest job', async () => {
+    const p1 = { ...VALID_AUDIT_PAYLOAD, release: { ...VALID_AUDIT_PAYLOAD.release, tag: 'v1.0.0' } };
+    const p2 = { ...VALID_AUDIT_PAYLOAD, release: { ...VALID_AUDIT_PAYLOAD.release, tag: 'v2.0.0' } };
+    await req('POST', '/api/v1/compliance/audit', p1, AUTH);
+    await req('POST', '/api/v1/compliance/audit', p2, AUTH);
+    const { status, body } = await req('GET', '/api/v1/compliance/audits?limit=1', undefined, AUTH);
+    assert.equal(status, 200);
+    assert.equal(body.jobs.length, 1);
+    assert.equal(body.count, 1);
+  });
+
+  test('?limit=200 is accepted (max allowed)', async () => {
+    const { status } = await req('GET', '/api/v1/compliance/audits?limit=200', undefined, AUTH);
+    assert.equal(status, 200);
+  });
+
+  test('?limit=201 is clamped to 200', async () => {
+    // Submit 1 job — if limit>200 were rejected we'd get 400; clamping means 200
+    await req('POST', '/api/v1/compliance/audit', VALID_AUDIT_PAYLOAD, AUTH);
+    const { status, body } = await req('GET', '/api/v1/compliance/audits?limit=201', undefined, AUTH);
+    assert.equal(status, 200);
+    assert.equal(body.jobs.length, 1, 'Overlarge limit is clamped to 200, not rejected');
+  });
+
+  test('?limit=0 returns 400', async () => {
+    const { status, body } = await req('GET', '/api/v1/compliance/audits?limit=0', undefined, AUTH);
+    assert.equal(status, 400);
+    assert.equal(body.success, false);
+  });
+
+  test('?limit=foo returns 400', async () => {
+    const { status, body } = await req('GET', '/api/v1/compliance/audits?limit=foo', undefined, AUTH);
+    assert.equal(status, 400);
+    assert.equal(body.success, false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/compliance/audits — rate limiting
+// ---------------------------------------------------------------------------
+
+describe('GET /api/v1/compliance/audits — rate limiting', () => {
+  test('returns 429 after exceeding 30 requests per minute', async () => {
+    const responses = await Promise.all(
+      Array.from({ length: 35 }, () => req('GET', '/api/v1/compliance/audits')),
+    );
+    const tooMany = responses.filter(r => r.status === 429);
+    assert.ok(tooMany.length >= 1, 'Expected at least one 429 response');
+    assert.equal(tooMany[0].body.success, false);
+    assert.match(tooMany[0].body.error, /Too many/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// _findJobsInAuditLog — unit tests
+// ---------------------------------------------------------------------------
+
+describe('_findJobsInAuditLog', () => {
+  test('returns empty array when log file does not exist', async () => {
+    process.env.AUDIT_LOG_FILE = '/tmp/govos-nonexistent-log-file.ndjson';
+    const result = await _findJobsInAuditLog({ orgId: null, limit: 50 });
+    assert.deepEqual(result, []);
+  });
+
+  test('returns all records when orgId is null', async () => {
+    // Use the writeFile helper to create a log with two records from different orgs
+    const { writeFile: wf } = await import('node:fs/promises');
+    const logPath = join(testDataDir, 'unit-test-log.ndjson');
+    const r1 = { jobId: 'j1', repository: 'acme/a', submittedAt: '2026-01-01T00:00:00Z' };
+    const r2 = { jobId: 'j2', repository: 'other/b', submittedAt: '2026-01-02T00:00:00Z' };
+    await wf(logPath, [r1, r2].map(r => JSON.stringify(r)).join('\n') + '\n', 'utf8');
+    process.env.AUDIT_LOG_FILE = logPath;
+
+    const result = await _findJobsInAuditLog({ orgId: null, limit: 50 });
+    assert.equal(result.length, 2);
+  });
+
+  test('filters by orgId when provided', async () => {
+    const { writeFile: wf } = await import('node:fs/promises');
+    const logPath = join(testDataDir, 'unit-test-filter.ndjson');
+    const r1 = { jobId: 'j1', repository: 'acme/a', submittedAt: '2026-01-01T00:00:00Z' };
+    const r2 = { jobId: 'j2', repository: 'other/b', submittedAt: '2026-01-02T00:00:00Z' };
+    const r3 = { jobId: 'j3', repository: 'acme/c', submittedAt: '2026-01-03T00:00:00Z' };
+    await wf(logPath, [r1, r2, r3].map(r => JSON.stringify(r)).join('\n') + '\n', 'utf8');
+    process.env.AUDIT_LOG_FILE = logPath;
+
+    const result = await _findJobsInAuditLog({ orgId: 'acme', limit: 50 });
+    assert.equal(result.length, 2);
+    for (const r of result) {
+      assert.equal(r.repository.split('/')[0], 'acme');
+    }
+  });
+
+  test('respects the limit parameter', async () => {
+    const { writeFile: wf } = await import('node:fs/promises');
+    const logPath = join(testDataDir, 'unit-test-limit.ndjson');
+    const records = Array.from({ length: 5 }, (_, i) => ({
+      jobId: `j${i}`, repository: 'acme/x',
+      submittedAt: `2026-01-0${i + 1}T00:00:00Z`,
+    }));
+    await wf(logPath, records.map(r => JSON.stringify(r)).join('\n') + '\n', 'utf8');
+    process.env.AUDIT_LOG_FILE = logPath;
+
+    const result = await _findJobsInAuditLog({ orgId: null, limit: 3 });
+    assert.equal(result.length, 3);
+  });
+
+  test('returns records sorted newest first', async () => {
+    const { writeFile: wf } = await import('node:fs/promises');
+    const logPath = join(testDataDir, 'unit-test-sort.ndjson');
+    const r1 = { jobId: 'j1', repository: 'acme/a', submittedAt: '2026-01-01T00:00:00Z' };
+    const r2 = { jobId: 'j2', repository: 'acme/b', submittedAt: '2026-01-03T00:00:00Z' };
+    const r3 = { jobId: 'j3', repository: 'acme/c', submittedAt: '2026-01-02T00:00:00Z' };
+    await wf(logPath, [r1, r2, r3].map(r => JSON.stringify(r)).join('\n') + '\n', 'utf8');
+    process.env.AUDIT_LOG_FILE = logPath;
+
+    const result = await _findJobsInAuditLog({ orgId: null, limit: 50 });
+    assert.equal(result[0].jobId, 'j2'); // newest
+    assert.equal(result[1].jobId, 'j3');
+    assert.equal(result[2].jobId, 'j1'); // oldest
+  });
+
+  test('skips malformed NDJSON lines', async () => {
+    const { writeFile: wf } = await import('node:fs/promises');
+    const logPath = join(testDataDir, 'unit-test-malformed.ndjson');
+    const r1 = { jobId: 'j1', repository: 'acme/a', submittedAt: '2026-01-01T00:00:00Z' };
+    await wf(logPath, JSON.stringify(r1) + '\n{BAD JSON}\n', 'utf8');
+    process.env.AUDIT_LOG_FILE = logPath;
+
+    const result = await _findJobsInAuditLog({ orgId: null, limit: 50 });
+    assert.equal(result.length, 1);
+    assert.equal(result[0].jobId, 'j1');
   });
 });

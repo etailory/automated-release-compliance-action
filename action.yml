@@ -43,6 +43,8 @@ outputs:
     description: "The compliance profile that was applied: 'default', 'iso27001', 'soc2', or 'dora'."
   report-path:
     description: "Path of the written JSON compliance report, if 'report-path' was provided."
+  audit-verdict:
+    description: "The governance verdict from the premium audit backend: 'approved', 'conditional', or 'blocked'. Only set when a premium license key is provided and the audit backend returns a governance verdict."
 
 runs:
   using: "node20"

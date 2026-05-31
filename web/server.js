@@ -5,9 +5,10 @@
  * GitHub Action (premium tier) and future web application clients.
  *
  * Endpoints (v1):
- *   POST /api/v1/compliance/verify  — Validate OIDC token and issue session token
- *   POST /api/v1/compliance/audit   — Receive repository metadata and run audit
- *   GET  /api/v1/compliance/audit/:jobId — Retrieve audit job status and result
+ *   POST /api/v1/compliance/verify         — Validate OIDC token and issue session token
+ *   POST /api/v1/compliance/audit          — Receive repository metadata and run audit
+ *   GET  /api/v1/compliance/audit/:jobId   — Retrieve audit job status and result
+ *   GET  /api/v1/compliance/audits         — List org audit history from durable log
  */
 
 import crypto from 'node:crypto';
@@ -280,6 +281,47 @@ async function _findJobInAuditLog(jobId) {
   return null;
 }
 
+/**
+ * Scan the NDJSON audit log, filter by org, sort newest-first, and slice.
+ *
+ * When orgId is non-null the result is restricted to jobs whose repository
+ * owner matches orgId. When orgId is null (single-tenant LICENSE_SECRET mode)
+ * all records are returned.
+ *
+ * @param {{ orgId: string|null, limit: number }} opts
+ * @returns {Promise<object[]>}
+ */
+export async function _findJobsInAuditLog({ orgId, limit }) {
+  const filePath = getAuditLogFilePath();
+  const records = [];
+  try {
+    const content = await fs.readFile(filePath, 'utf8');
+    for (const line of content.split('\n')) {
+      if (!line.trim()) continue;
+      try {
+        const record = JSON.parse(line);
+        if (orgId !== null) {
+          const owner = (record.repository ?? '').split('/')[0];
+          if (owner !== orgId) continue;
+        }
+        records.push(record);
+      } catch { /* skip malformed lines */ }
+    }
+  } catch (err) {
+    if (err.code !== 'ENOENT') {
+      console.error(`[WARN] Failed to scan audit log ${filePath}:`, err.message);
+    }
+  }
+  records.sort((a, b) => {
+    const ta = a.submittedAt ?? '';
+    const tb = b.submittedAt ?? '';
+    if (ta < tb) return 1;
+    if (ta > tb) return -1;
+    return 0;
+  });
+  return records.slice(0, limit);
+}
+
 // ---------------------------------------------------------------------------
 // JWKS cache — exported so tests can reset between runs
 // ---------------------------------------------------------------------------
@@ -333,9 +375,10 @@ function getSessionSecret() {
 // Rate limiters — exported so tests can reset stores between runs
 // ---------------------------------------------------------------------------
 
-export const _auditLimiterStore    = new MemoryStore();
-export const _verifyLimiterStore   = new MemoryStore();
-export const _getAuditLimiterStore = new MemoryStore();
+export const _auditLimiterStore       = new MemoryStore();
+export const _verifyLimiterStore      = new MemoryStore();
+export const _getAuditLimiterStore    = new MemoryStore();
+export const _listAuditsLimiterStore  = new MemoryStore();
 
 const auditLimiter = rateLimit({
   windowMs:       60_000,
@@ -359,6 +402,15 @@ const getAuditLimiter = rateLimit({
   windowMs:       60_000,
   max:            60,
   store:          _getAuditLimiterStore,
+  standardHeaders: true,
+  legacyHeaders:  false,
+  message: { success: false, error: 'Too many requests. Please retry after 1 minute.' },
+});
+
+const listAuditsLimiter = rateLimit({
+  windowMs:       60_000,
+  max:            30,
+  store:          _listAuditsLimiterStore,
   standardHeaders: true,
   legacyHeaders:  false,
   message: { success: false, error: 'Too many requests. Please retry after 1 minute.' },
@@ -636,6 +688,90 @@ app.get('/api/v1/compliance/audit/:jobId', getAuditLimiter, async (req, res) => 
   } catch (error) {
     console.error('[GET /api/v1/compliance/audit/:jobId] Error:', error);
     return res.status(500).json({ success: false, error: 'Internal server error fetching job status.' });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/compliance/audits
+//
+// Returns the authenticated org's audit jobs from the durable NDJSON log,
+// sorted newest first.
+//
+// Authentication: same rules as GET /api/v1/compliance/audit/:jobId —
+//   required when LICENSE_SECRET is set or org registry is non-empty; open
+//   in dev/free-tier mode.
+//
+// Org scope:
+//   - Registry-enforced multi-tenant mode (orgId non-null): only jobs whose
+//     repository owner matches the authenticated org are returned.
+//   - Single-tenant LICENSE_SECRET mode (orgId null): all jobs returned.
+//
+// Query params:
+//   limit  — positive integer (default 50, max 200)
+//
+// Rate limit: 30 requests per minute per IP.
+// ---------------------------------------------------------------------------
+
+app.get('/api/v1/compliance/audits', listAuditsLimiter, async (req, res) => {
+  try {
+    let authResult = null;
+    if (process.env.LICENSE_SECRET || isRegistryEnforced()) {
+      const authHeader  = req.headers['authorization'] ?? '';
+      const bearerToken = authHeader.startsWith('Bearer ')
+        ? authHeader.slice('Bearer '.length).trim()
+        : '';
+
+      if (!bearerToken) {
+        return res.status(401).json({
+          success: false,
+          error:   'Missing or invalid Authorization header. Expected: Bearer <license-key|session-token>',
+        });
+      }
+
+      authResult = await authenticateBearerToken(bearerToken);
+      if (!authResult.valid) {
+        return res.status(401).json({ success: false, error: 'Invalid authorization token.' });
+      }
+
+      if (isRegistryEnforced() && authResult.orgId) {
+        if (!orgRegistry.has(authResult.orgId)) {
+          return res.status(403).json({
+            success: false,
+            error:   `Organization '${authResult.orgId}' is not registered or has been evicted.`,
+          });
+        }
+      }
+    }
+
+    // Parse and clamp ?limit
+    const DEFAULT_LIMIT = 50;
+    const MAX_LIMIT     = 200;
+    let limit = DEFAULT_LIMIT;
+    if (req.query.limit !== undefined) {
+      const parsed = Number(req.query.limit);
+      if (!Number.isInteger(parsed) || parsed < 1) {
+        return res.status(400).json({
+          success: false,
+          error:   'Invalid limit: must be a positive integer.',
+        });
+      }
+      limit = Math.min(parsed, MAX_LIMIT);
+    }
+
+    // Determine org scope for filtering
+    const orgId = (isRegistryEnforced() && authResult?.orgId) ? authResult.orgId : null;
+
+    const jobs = await _findJobsInAuditLog({ orgId, limit });
+
+    return res.status(200).json({
+      success: true,
+      count:   jobs.length,
+      jobs,
+    });
+
+  } catch (error) {
+    console.error('[GET /api/v1/compliance/audits] Error:', error);
+    return res.status(500).json({ success: false, error: 'Internal server error listing audit history.' });
   }
 });
 
