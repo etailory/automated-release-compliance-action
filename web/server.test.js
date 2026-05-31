@@ -10,7 +10,7 @@
 import { test, describe, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { app, auditJobs, validateLicenseKey } from './server.js';
+import { app, auditJobs, evictedJobIds, validateLicenseKey, _auditLimiterStore, _verifyLimiterStore } from './server.js';
 
 // ---------------------------------------------------------------------------
 // Test server lifecycle — bind to a random port so tests never conflict
@@ -35,9 +35,13 @@ after(async () => {
   });
 });
 
-beforeEach(() => {
-  // Reset job store between tests for isolation
+beforeEach(async () => {
+  // Reset job store and eviction tracking between tests for isolation
   auditJobs.clear();
+  evictedJobIds.clear();
+  // Reset rate limiter counters so tests don't bleed into each other
+  await _auditLimiterStore.resetAll?.();
+  await _verifyLimiterStore.resetAll?.();
   // Ensure LICENSE_SECRET is unset by default so tests work in dev mode
   delete process.env.LICENSE_SECRET;
 });
@@ -310,6 +314,76 @@ describe('404 fallback', () => {
     const { status, body } = await req('GET', '/api/v1/nonexistent');
     assert.equal(status, 404);
     assert.ok(body.error);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Rate limiting
+// ---------------------------------------------------------------------------
+
+describe('POST /api/v1/compliance/audit — rate limiting', () => {
+  const AUTH = { Authorization: 'Bearer test-key' };
+
+  test('returns 429 after exceeding 30 requests per minute', async () => {
+    // Send 31 parallel requests; at least one must be rejected
+    const responses = await Promise.all(
+      Array.from({ length: 31 }, () =>
+        req('POST', '/api/v1/compliance/audit', VALID_AUDIT_PAYLOAD, AUTH)
+      )
+    );
+    const tooMany = responses.filter(r => r.status === 429);
+    assert.ok(tooMany.length >= 1, 'Expected at least one 429 response');
+    assert.equal(tooMany[0].body.success, false);
+    assert.match(tooMany[0].body.error, /Too many/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TTL eviction + 410 Gone
+// ---------------------------------------------------------------------------
+
+describe('TTL eviction and 410 Gone', () => {
+  const AUTH = { Authorization: 'Bearer test-key' };
+
+  test('evicts expired jobs on the next write and returns 410 Gone', async () => {
+    // Inject an already-expired job directly into the store
+    const expiredId = 'audit-expired-test-job';
+    auditJobs.set(expiredId, {
+      status:      'complete',
+      submittedAt: new Date(Date.now() - 25 * 3_600_000).toISOString(),
+      completedAt: new Date(Date.now() - 25 * 3_600_000).toISOString(),
+      repository:  'acme/widgets',
+      tag:         'v0.0.1',
+      expiresAt:   Date.now() - 1000, // already past TTL
+      result:      {},
+    });
+
+    // Trigger lazy eviction by writing a new job
+    await req('POST', '/api/v1/compliance/audit', VALID_AUDIT_PAYLOAD, AUTH);
+
+    // Expired job must be purged from the live store
+    assert.equal(auditJobs.has(expiredId), false, 'Expired job must be evicted from auditJobs');
+
+    // GET must return 410, not 404, so callers know the job existed
+    const { status, body } = await req('GET', `/api/v1/compliance/audit/${expiredId}`);
+    assert.equal(status, 410);
+    assert.equal(body.success, false);
+  });
+
+  test('returns 404 (not 410) for a job that never existed', async () => {
+    const { status, body } = await req('GET', '/api/v1/compliance/audit/never-existed-xxxx');
+    assert.equal(status, 404);
+    assert.equal(body.success, false);
+  });
+
+  test('non-expired jobs are not evicted', async () => {
+    const { body: post } = await req('POST', '/api/v1/compliance/audit', VALID_AUDIT_PAYLOAD, AUTH);
+    const jobId = post.jobId;
+
+    // The job should still be live
+    assert.ok(auditJobs.has(jobId), 'Live job must remain in the store');
+    const { status } = await req('GET', `/api/v1/compliance/audit/${jobId}`);
+    assert.equal(status, 200);
   });
 });
 

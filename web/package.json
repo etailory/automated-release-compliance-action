@@ -10,7 +10,8 @@
     "test": "node --test server.test.js"
   },
   "dependencies": {
-    "express": "^4.19.2"
+    "express": "^4.19.2",
+    "express-rate-limit": "^7.5.0"
   },
   "engines": {
     "node": ">=20"

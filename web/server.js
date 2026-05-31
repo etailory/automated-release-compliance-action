@@ -13,6 +13,7 @@
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import express from 'express';
+import rateLimit, { MemoryStore } from 'express-rate-limit';
 
 export const app  = express();
 const PORT = process.env.PORT ?? 3000;
@@ -30,12 +31,64 @@ const PORT = process.env.PORT ?? 3000;
  *   completedAt?: string,
  *   repository: string,
  *   tag: string,
+ *   expiresAt: number,
  *   result?: object
  * }} AuditJob
  */
 
 /** @type {Map<string, AuditJob>} */
 export const auditJobs = new Map();
+
+/**
+ * Tracks evicted job IDs so GET can distinguish 410 Gone from 404 Not Found.
+ * Capped at EVICTED_IDS_MAX to bound memory usage.
+ * @type {Set<string>}
+ */
+export const evictedJobIds = new Set();
+
+const JOB_TTL_MS      = 24 * 3_600_000;
+const EVICTED_IDS_MAX = 10_000;
+
+/**
+ * Scans auditJobs for expired entries, removes them, and records their IDs
+ * in evictedJobIds so GET can return 410. Called lazily on each write.
+ */
+function evictExpiredJobs() {
+  const now = Date.now();
+  for (const [id, job] of auditJobs) {
+    if (job.expiresAt <= now) {
+      auditJobs.delete(id);
+      if (evictedJobIds.size < EVICTED_IDS_MAX) {
+        evictedJobIds.add(id);
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Rate limiters — exported so tests can reset stores between runs
+// ---------------------------------------------------------------------------
+
+export const _auditLimiterStore  = new MemoryStore();
+export const _verifyLimiterStore = new MemoryStore();
+
+const auditLimiter = rateLimit({
+  windowMs:       60_000,
+  max:            30,
+  store:          _auditLimiterStore,
+  standardHeaders: true,
+  legacyHeaders:  false,
+  message: { success: false, error: 'Too many audit requests. Please retry after 1 minute.' },
+});
+
+const verifyLimiter = rateLimit({
+  windowMs:       300_000,
+  max:            10,
+  store:          _verifyLimiterStore,
+  standardHeaders: true,
+  legacyHeaders:  false,
+  message: { success: false, error: 'Too many verification requests. Please retry after 5 minutes.' },
+});
 
 // ---------------------------------------------------------------------------
 // Middleware
@@ -72,7 +125,7 @@ app.get('/health', (_req, res) => {
 // }
 // ---------------------------------------------------------------------------
 
-app.post('/api/v1/compliance/verify', async (req, res) => {
+app.post('/api/v1/compliance/verify', verifyLimiter, async (req, res) => {
   try {
     const { oidcToken, organizationId, serviceAccountId, federationRuleId } = req.body ?? {};
 
@@ -134,7 +187,7 @@ app.post('/api/v1/compliance/verify', async (req, res) => {
 // }
 // ---------------------------------------------------------------------------
 
-app.post('/api/v1/compliance/audit', async (req, res) => {
+app.post('/api/v1/compliance/audit', auditLimiter, async (req, res) => {
   try {
     // Extract Bearer token from Authorization header
     const authHeader = req.headers['authorization'] ?? '';
@@ -200,6 +253,9 @@ app.get('/api/v1/compliance/audit/:jobId', async (req, res) => {
     const jobStatus = await getAuditJobStatus(jobId);
 
     if (!jobStatus) {
+      if (evictedJobIds.has(jobId)) {
+        return res.status(410).json({ success: false, error: `Audit job expired and has been evicted: ${jobId}` });
+      }
       return res.status(404).json({ success: false, error: `Audit job not found: ${jobId}` });
     }
 
@@ -322,12 +378,15 @@ async function enqueueAuditJob({ licenseKey, repository, release, requested }) {
     completedAt: new Date().toISOString(),
   };
 
+  evictExpiredJobs();
+
   auditJobs.set(jobId, {
     status:      'complete',
     submittedAt,
     completedAt: result.completedAt,
     repository,
     tag:         release.tag,
+    expiresAt:   Date.now() + JOB_TTL_MS,
     result,
   });
 
