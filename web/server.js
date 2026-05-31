@@ -546,6 +546,39 @@ app.get('/api/v1/compliance/audit/:jobId', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Missing jobId parameter' });
     }
 
+    // Require auth in enforcement mode (LICENSE_SECRET set or org registry non-empty).
+    // Dev mode (both unset/empty) preserves the previous open behaviour for free-tier callers.
+    if (process.env.LICENSE_SECRET || isRegistryEnforced()) {
+      const authHeader  = req.headers['authorization'] ?? '';
+      const bearerToken = authHeader.startsWith('Bearer ')
+        ? authHeader.slice('Bearer '.length).trim()
+        : '';
+
+      if (!bearerToken) {
+        return res.status(401).json({
+          success: false,
+          error:   'Missing or invalid Authorization header. Expected: Bearer <license-key|session-token>',
+        });
+      }
+
+      const authResult = await authenticateBearerToken(bearerToken);
+      if (!authResult.valid) {
+        return res.status(401).json({
+          success: false,
+          error:   'Invalid authorization token.',
+        });
+      }
+
+      if (isRegistryEnforced() && authResult.orgId) {
+        if (!orgRegistry.has(authResult.orgId)) {
+          return res.status(403).json({
+            success: false,
+            error:   `Organization '${authResult.orgId}' is not registered or has been evicted.`,
+          });
+        }
+      }
+    }
+
     const jobStatus = await getAuditJobStatus(jobId);
 
     if (!jobStatus) {

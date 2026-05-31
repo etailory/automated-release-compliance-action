@@ -436,6 +436,67 @@ describe('GET /api/v1/compliance/audit/:jobId', () => {
 });
 
 // ---------------------------------------------------------------------------
+// GET /api/v1/compliance/audit/:jobId — auth (enforcement mode)
+// ---------------------------------------------------------------------------
+
+describe('GET /api/v1/compliance/audit/:jobId — auth', () => {
+  const AUTH = { Authorization: 'Bearer test-key' };
+
+  test('returns 401 when no auth header and LICENSE_SECRET is set (enforcement mode)', async () => {
+    process.env.LICENSE_SECRET = 'some-license-secret';
+    const { body: post } = await req('POST', '/api/v1/compliance/audit', VALID_AUDIT_PAYLOAD, {
+      Authorization: 'Bearer some-license-secret',
+    });
+    const { status, body } = await req('GET', `/api/v1/compliance/audit/${post.jobId}`);
+    assert.equal(status, 401);
+    assert.equal(body.success, false);
+  });
+
+  test('returns 401 when no auth header and org registry is non-empty (enforcement mode)', async () => {
+    orgRegistry.set('acme-corp', { licenseKey: 'lk-acme', allowedSubs: ['repo:acme/*'] });
+    const { body: post } = await req('POST', '/api/v1/compliance/audit', VALID_AUDIT_PAYLOAD, {
+      Authorization: 'Bearer lk-acme',
+    });
+    const { status, body } = await req('GET', `/api/v1/compliance/audit/${post.jobId}`);
+    assert.equal(status, 401);
+    assert.equal(body.success, false);
+  });
+
+  test('returns 200 when valid license key provided in enforcement mode', async () => {
+    process.env.LICENSE_SECRET = 'valid-key-123';
+    const { body: post } = await req('POST', '/api/v1/compliance/audit', VALID_AUDIT_PAYLOAD, {
+      Authorization: 'Bearer valid-key-123',
+    });
+    const { status, body } = await req('GET', `/api/v1/compliance/audit/${post.jobId}`, undefined, {
+      Authorization: 'Bearer valid-key-123',
+    });
+    assert.equal(status, 200);
+    assert.equal(body.success, true);
+    assert.equal(body.jobId, post.jobId);
+  });
+
+  test('returns 401 when wrong token provided in enforcement mode', async () => {
+    process.env.LICENSE_SECRET = 'correct-key';
+    const { body: post } = await req('POST', '/api/v1/compliance/audit', VALID_AUDIT_PAYLOAD, {
+      Authorization: 'Bearer correct-key',
+    });
+    const { status, body } = await req('GET', `/api/v1/compliance/audit/${post.jobId}`, undefined, {
+      Authorization: 'Bearer wrong-key-xx',
+    });
+    assert.equal(status, 401);
+    assert.equal(body.success, false);
+  });
+
+  test('dev mode (no LICENSE_SECRET, empty registry) allows unauthenticated GET', async () => {
+    // beforeEach already clears registry and deletes LICENSE_SECRET — dev mode is default
+    const { body: post } = await req('POST', '/api/v1/compliance/audit', VALID_AUDIT_PAYLOAD, AUTH);
+    const { status, body } = await req('GET', `/api/v1/compliance/audit/${post.jobId}`);
+    assert.equal(status, 200);
+    assert.equal(body.success, true);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // POST /api/v1/compliance/verify — input validation
 // ---------------------------------------------------------------------------
 

@@ -282,6 +282,21 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
+  /docs:
+    get:
+      tags: [health]
+      summary: API documentation viewer
+      description: Renders the OpenAPI 3.0 specification as an interactive Redoc HTML page.
+      operationId: getDocs
+      security: []
+      responses:
+        "200":
+          description: Redoc HTML documentation page
+          content:
+            text/html:
+              schema:
+                type: string
+
   /api/v1/compliance/verify:
     post:
       tags: [compliance]
@@ -511,8 +526,15 @@ paths:
         Jobs are retained in memory for 24 hours; after that the response is
         `410 Gone`. Jobs from prior server process runs are read from the durable
         NDJSON audit log file.
+
+        **Authentication (enforcement mode):** When `LICENSE_SECRET` is set or the
+        organization registry is non-empty, the request must include a valid
+        `Authorization: Bearer <session-token|license-key>` header. In development
+        / free-tier mode (neither condition active) the endpoint is open.
       operationId: getAuditJob
-      security: []
+      security:
+        - BearerAuth: []
+        - {}  # security is optional — open in dev/free-tier mode
       parameters:
         - name: jobId
           in: path
