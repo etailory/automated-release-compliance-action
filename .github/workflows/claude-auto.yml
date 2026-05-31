@@ -21,11 +21,16 @@ jobs:
       id-token: write
     steps:
       - name: Checkout dev branch
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
         with:
           ref: dev
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
       - name: Run Claude Autonomous Loop
         uses: anthropics/claude-code-action@main
@@ -43,7 +48,11 @@ jobs:
             Follow the process in .github/AUTONOMOUS_LOOP.md EXACTLY, in order:
               1. Implement the issue above (smallest deployable MVP increment).
               2. Review your own diff and fix every finding.
-              3. Commit and push DIRECTLY to the `dev` branch (no pull request).
+              3. Commit and push DIRECTLY to the `dev` branch — use plain git:
+                    git add <files>
+                    git commit -m "<message>"
+                    git push origin dev
+                 DO NOT create a pull request. DO NOT use git-push.sh.
               4. Comment the result on issue #${{ github.event.issue.number }}
                  and close it if fully resolved.
               5. Decide the next best step toward the MVP in README.md and open a
@@ -54,6 +63,6 @@ jobs:
           claude_args: |
             --model claude-sonnet-4-6
             --max-turns 40
-            --allowedTools "Bash(bun install),Bash(bun test),Bash(bun run build),Bash(bun typecheck),Bash,Edit,Write,Read,Glob,Grep"
+            --allowedTools "Bash,Edit,Write,Read,Glob,Grep"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
