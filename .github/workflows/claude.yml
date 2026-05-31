@@ -40,4 +40,4 @@ jobs:
             --max-turns 40
             --allowedTools "Bash,Edit,Write,Read,Glob,Grep"
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
