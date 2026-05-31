@@ -5,7 +5,7 @@
  * GitHub Action (premium tier) and future web application clients.
  *
  * Endpoints (v1):
- *   POST /api/v1/compliance/verify  — Validate OIDC token and license key
+ *   POST /api/v1/compliance/verify  — Validate OIDC token and issue session token
  *   POST /api/v1/compliance/audit   — Receive repository metadata and run audit
  *   GET  /api/v1/compliance/audit/:jobId — Retrieve audit job status and result
  */
@@ -14,6 +14,7 @@ import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import express from 'express';
 import rateLimit, { MemoryStore } from 'express-rate-limit';
+import { createLocalJWKSet, jwtVerify, SignJWT } from 'jose';
 
 export const app  = express();
 const PORT = process.env.PORT ?? 3000;
@@ -66,6 +67,55 @@ function evictExpiredJobs() {
 }
 
 // ---------------------------------------------------------------------------
+// JWKS cache — exported so tests can reset between runs
+// ---------------------------------------------------------------------------
+
+let _jwksCache = null;
+let _jwksCacheExpiry = 0;
+const JWKS_CACHE_TTL_MS = 5 * 60 * 1_000;
+
+export function _resetJwksCache() {
+  _jwksCache = null;
+  _jwksCacheExpiry = 0;
+}
+
+async function fetchJwks() {
+  const now = Date.now();
+  if (_jwksCache && now < _jwksCacheExpiry) {
+    return _jwksCache;
+  }
+  const jwksUrl = process.env.JWKS_URL ?? 'https://token.actions.githubusercontent.com/.well-known/jwks';
+  const response = await fetch(jwksUrl);
+  if (!response.ok) {
+    throw new Error(`JWKS fetch failed: HTTP ${response.status}`);
+  }
+  _jwksCache = await response.json();
+  _jwksCacheExpiry = now + JWKS_CACHE_TTL_MS;
+  return _jwksCache;
+}
+
+// ---------------------------------------------------------------------------
+// Session secret
+// In production, SESSION_SECRET must be set. In dev/test, an ephemeral random
+// key is generated at startup with a warning — tokens won't survive restarts.
+// ---------------------------------------------------------------------------
+
+const _devSessionSecret = crypto.randomBytes(32);
+let _devSecretWarned = false;
+
+function getSessionSecret() {
+  const envSecret = process.env.SESSION_SECRET;
+  if (envSecret) {
+    return new TextEncoder().encode(envSecret);
+  }
+  if (!_devSecretWarned) {
+    console.warn('[WARN] SESSION_SECRET not configured — using ephemeral random secret (development mode only).');
+    _devSecretWarned = true;
+  }
+  return _devSessionSecret;
+}
+
+// ---------------------------------------------------------------------------
 // Rate limiters — exported so tests can reset stores between runs
 // ---------------------------------------------------------------------------
 
@@ -112,16 +162,15 @@ app.get('/health', (_req, res) => {
 // ---------------------------------------------------------------------------
 // POST /api/v1/compliance/verify
 //
-// Validates the OIDC token and organization license supplied by the GitHub
-// Action. On success, returns a session token granting access to audit
-// endpoints. On failure, returns 401 with a descriptive error.
+// Validates the OIDC token issued by GitHub Actions against the GitHub JWKS,
+// then issues a short-lived HMAC-signed session token for subsequent API calls.
 //
 // Expected request body:
 // {
-//   "oidcToken":       string,   // Short-lived GitHub OIDC JWT
-//   "organizationId":  string,   // Governor OS tenant ID
+//   "oidcToken":        string,  // Short-lived GitHub OIDC JWT
+//   "organizationId":   string,  // Governor OS tenant ID
 //   "serviceAccountId": string,  // CI service account identifier
-//   "federationRuleId": string   // OIDC federation rule configured in Governor OS
+//   "federationRuleId": string   // OIDC sub prefix to match
 // }
 // ---------------------------------------------------------------------------
 
@@ -137,12 +186,9 @@ app.post('/api/v1/compliance/verify', verifyLimiter, async (req, res) => {
       });
     }
 
-    // TODO: implement real OIDC token verification against GitHub's JWKS endpoint
-    // TODO: validate organizationId license status against the Governor OS database
-    const verificationResult = await verifyOidcAndLicense({
+    const verificationResult = await verifyOidcAndIssueSession({
       oidcToken,
       organizationId,
-      serviceAccountId,
       federationRuleId,
     });
 
@@ -150,22 +196,26 @@ app.post('/api/v1/compliance/verify', verifyLimiter, async (req, res) => {
       success:      true,
       sessionToken: verificationResult.sessionToken,
       expiresIn:    verificationResult.expiresIn,
-      message:      'OIDC token and license verified. Session token issued.',
+      message:      'OIDC token verified. Session token issued.',
     });
 
   } catch (error) {
-    console.error('[/api/v1/compliance/verify] Error:', error);
-    return res.status(500).json({ success: false, error: 'Internal server error during verification.' });
+    console.error('[/api/v1/compliance/verify] Error:', error.message);
+    const statusCode = error.statusCode ?? 500;
+    const message    = statusCode < 500
+      ? error.message
+      : 'Internal server error during verification.';
+    return res.status(statusCode).json({ success: false, error: message });
   }
 });
 
 // ---------------------------------------------------------------------------
 // POST /api/v1/compliance/audit
 //
-// Receives an AuditPayload from the GitHub Action (premium tier), validates
-// the license key, and processes the audit synchronously.
+// Receives an AuditPayload from the GitHub Action (premium tier) and processes
+// the audit synchronously.
 //
-// Authentication: Authorization: Bearer <license-key>
+// Authentication: Authorization: Bearer <license-key | session-token>
 //
 // Expected request body (AuditPayload):
 // {
@@ -190,22 +240,22 @@ app.post('/api/v1/compliance/verify', verifyLimiter, async (req, res) => {
 app.post('/api/v1/compliance/audit', auditLimiter, async (req, res) => {
   try {
     // Extract Bearer token from Authorization header
-    const authHeader = req.headers['authorization'] ?? '';
-    const licenseKey = authHeader.startsWith('Bearer ')
+    const authHeader  = req.headers['authorization'] ?? '';
+    const bearerToken = authHeader.startsWith('Bearer ')
       ? authHeader.slice('Bearer '.length).trim()
       : '';
 
-    if (!licenseKey) {
+    if (!bearerToken) {
       return res.status(401).json({
         success: false,
-        error:   'Missing or invalid Authorization header. Expected: Bearer <license-key>',
+        error:   'Missing or invalid Authorization header. Expected: Bearer <license-key|session-token>',
       });
     }
 
-    if (!validateLicenseKey(licenseKey)) {
+    if (!(await validateBearerToken(bearerToken))) {
       return res.status(401).json({
         success: false,
-        error:   'Invalid license key.',
+        error:   'Invalid authorization token.',
       });
     }
 
@@ -219,7 +269,7 @@ app.post('/api/v1/compliance/audit', auditLimiter, async (req, res) => {
       });
     }
 
-    const auditJob = await enqueueAuditJob({ licenseKey, repository, release, requested });
+    const auditJob = await enqueueAuditJob({ authToken: bearerToken, repository, release, requested });
 
     return res.status(202).json({
       success: true,
@@ -313,6 +363,26 @@ export function validateLicenseKey(licenseKey) {
 }
 
 /**
+ * Validate a bearer token — accepts either an HMAC-signed session token
+ * issued by the verify endpoint, or a plain license key.
+ *
+ * @param {string} token
+ * @returns {Promise<boolean>}
+ */
+async function validateBearerToken(token) {
+  // JWT detection: three dot-separated parts
+  if (token.split('.').length === 3) {
+    try {
+      const { payload } = await jwtVerify(token, getSessionSecret());
+      if (payload.sub && payload.orgId) return true;
+    } catch {
+      // Not a valid session token — fall through to license key check
+    }
+  }
+  return validateLicenseKey(token);
+}
+
+/**
  * Derive a governance verdict from the release metadata.
  *
  * @param {{ isDraft: boolean, isPrerelease: boolean }} release
@@ -340,14 +410,10 @@ function deriveGovernanceVerdict(release) {
 /**
  * Store and process an audit job in the in-memory store.
  *
- * Jobs are processed synchronously so that GET /audit/:jobId immediately
- * returns a "complete" status — no background worker or database needed for
- * the MVP.
- *
- * @param {{ licenseKey: string, repository: string, release: object, requested: object }} params
+ * @param {{ authToken: string, repository: string, release: object, requested: object }} params
  * @returns {Promise<{ jobId: string }>}
  */
-async function enqueueAuditJob({ licenseKey, repository, release, requested }) {
+async function enqueueAuditJob({ authToken, repository, release, requested }) {
   const safeRepo    = repository.replace(/[^a-zA-Z0-9-]/g, '_');
   const jobId       = `audit-${safeRepo}-${release.tag}-${Date.now()}`;
   const submittedAt = new Date().toISOString();
@@ -390,7 +456,7 @@ async function enqueueAuditJob({ licenseKey, repository, release, requested }) {
     result,
   });
 
-  console.log(`[enqueueAuditJob] Processed: ${jobId} → verdict: ${governance.verdict} (license prefix: ${licenseKey.slice(0, 8)}...)`);
+  console.log(`[enqueueAuditJob] Processed: ${jobId} → verdict: ${governance.verdict} (auth prefix: ${authToken.slice(0, 8)}...)`);
   return { jobId };
 }
 
@@ -414,19 +480,58 @@ async function getAuditJobStatus(jobId) {
 }
 
 /**
- * Placeholder: verifies the OIDC token against GitHub JWKS and checks the
- * organization's license status in the Governor OS database.
+ * Verifies a GitHub Actions OIDC JWT against the GitHub JWKS endpoint and
+ * issues a short-lived HMAC-signed session token.
+ *
+ * Throws with statusCode 503 if the JWKS endpoint is unreachable.
+ * Throws with statusCode 401 if token verification fails.
+ *
+ * @param {{ oidcToken: string, organizationId: string, federationRuleId: string }} params
+ * @returns {Promise<{ sessionToken: string, expiresIn: number }>}
  */
-async function verifyOidcAndLicense({ oidcToken, organizationId, federationRuleId }) {
-  // TODO: fetch GitHub JWKS from https://token.actions.githubusercontent.com/.well-known/jwks
-  // TODO: verify JWT signature, iss, aud, and sub claims against federationRuleId
-  // TODO: query the Governor OS database for organizationId license status
-  console.log(`[verifyOidcAndLicense] org=${organizationId} rule=${federationRuleId} token_prefix=${oidcToken.slice(0, 12)}...`);
+async function verifyOidcAndIssueSession({ oidcToken, organizationId, federationRuleId }) {
+  const oidcIssuer   = process.env.OIDC_ISSUER   ?? 'https://token.actions.githubusercontent.com';
+  const oidcAudience = process.env.OIDC_AUDIENCE ?? 'governor-os';
 
-  return {
-    sessionToken: `session-${organizationId}-placeholder`,
-    expiresIn:    3600,
-  };
+  let jwks;
+  try {
+    jwks = await fetchJwks();
+  } catch (err) {
+    console.error('[verifyOidcAndIssueSession] JWKS fetch error:', err.message);
+    const e = new Error('Token verification service temporarily unavailable. Please retry.');
+    e.statusCode = 503;
+    throw e;
+  }
+
+  const keySet = createLocalJWKSet(jwks);
+  let payload;
+  try {
+    ({ payload } = await jwtVerify(oidcToken, keySet, {
+      issuer:   oidcIssuer,
+      audience: oidcAudience,
+    }));
+  } catch (err) {
+    const e = new Error(`OIDC token verification failed: ${err.message}`);
+    e.statusCode = 401;
+    throw e;
+  }
+
+  // Validate sub against federationRuleId using prefix match
+  const sub = payload.sub ?? '';
+  if (!sub.startsWith(federationRuleId)) {
+    const e = new Error(`OIDC token sub does not satisfy federation rule '${federationRuleId}'`);
+    e.statusCode = 401;
+    throw e;
+  }
+
+  const sessionToken = await new SignJWT({ sub, orgId: organizationId })
+    .setProtectedHeader({ alg: 'HS256' })
+    .setIssuedAt()
+    .setExpirationTime('1h')
+    .sign(getSessionSecret());
+
+  console.log(`[verifyOidcAndIssueSession] Session issued: org=${organizationId} sub=${sub.slice(0, 50)}`);
+  return { sessionToken, expiresIn: 3600 };
 }
 
 // ---------------------------------------------------------------------------

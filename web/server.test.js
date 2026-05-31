@@ -2,7 +2,7 @@
  * Governor OS Web Server — integration tests
  *
  * Uses Node.js built-in node:test and native fetch (Node 18+). No external
- * test dependencies required.
+ * test dependencies required beyond jose (already in package.json).
  *
  * Run with: npm test (or: node --test server.test.js)
  */
@@ -10,7 +10,16 @@
 import { test, describe, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { app, auditJobs, evictedJobIds, validateLicenseKey, _auditLimiterStore, _verifyLimiterStore } from './server.js';
+import { generateKeyPair, exportJWK, SignJWT } from 'jose';
+import {
+  app,
+  auditJobs,
+  evictedJobIds,
+  validateLicenseKey,
+  _auditLimiterStore,
+  _verifyLimiterStore,
+  _resetJwksCache,
+} from './server.js';
 
 // ---------------------------------------------------------------------------
 // Test server lifecycle — bind to a random port so tests never conflict
@@ -19,11 +28,51 @@ import { app, auditJobs, evictedJobIds, validateLicenseKey, _auditLimiterStore, 
 let server;
 let baseUrl;
 
+// OIDC test state — populated in before()
+let testPrivateKey;       // RSA private key for signing test JWTs
+let testPublicJwk;        // Corresponding public JWK served by mock JWKS server
+let wrongPrivateKey;      // A different RSA key — used to simulate invalid signatures
+let mockJwksServer;       // HTTP server that serves testPublicJwk as a JWKS
+let mockJwksPort;
+let mockJwksMode = 'ok';  // 'ok' | 'error' — controls mock server response
+
 before(async () => {
+  // Start the app server
   await new Promise((resolve) => {
     server = app.listen(0, '127.0.0.1', () => {
       const { port } = server.address();
       baseUrl = `http://127.0.0.1:${port}`;
+      resolve();
+    });
+  });
+
+  // Generate RSA key pair for test JWTs
+  const { privateKey, publicKey } = await generateKeyPair('RS256');
+  testPrivateKey = privateKey;
+  const rawJwk = await exportJWK(publicKey);
+  testPublicJwk = { ...rawJwk, kid: 'test-key-1', use: 'sig', alg: 'RS256' };
+
+  // Generate a second key pair — used to produce JWTs with invalid signatures
+  ({ privateKey: wrongPrivateKey } = await generateKeyPair('RS256'));
+
+  // Start mock JWKS server
+  await new Promise((resolve) => {
+    mockJwksServer = createServer((req, res) => {
+      if (req.url === '/.well-known/jwks') {
+        if (mockJwksMode === 'error') {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Internal server error' }));
+        } else {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ keys: [testPublicJwk] }));
+        }
+      } else {
+        res.writeHead(404);
+        res.end();
+      }
+    });
+    mockJwksServer.listen(0, '127.0.0.1', () => {
+      mockJwksPort = mockJwksServer.address().port;
       resolve();
     });
   });
@@ -32,6 +81,9 @@ before(async () => {
 after(async () => {
   await new Promise((resolve, reject) => {
     server.close((err) => (err ? reject(err) : resolve()));
+  });
+  await new Promise((resolve, reject) => {
+    mockJwksServer.close((err) => (err ? reject(err) : resolve()));
   });
 });
 
@@ -44,6 +96,13 @@ beforeEach(async () => {
   await _verifyLimiterStore.resetAll?.();
   // Ensure LICENSE_SECRET is unset by default so tests work in dev mode
   delete process.env.LICENSE_SECRET;
+  // Set OIDC env vars and reset JWKS cache for every test
+  process.env.JWKS_URL      = `http://127.0.0.1:${mockJwksPort}/.well-known/jwks`;
+  process.env.OIDC_ISSUER   = 'https://token.actions.githubusercontent.com';
+  process.env.OIDC_AUDIENCE = 'governor-os';
+  process.env.SESSION_SECRET = 'test-session-secret-exactly-32bytes';
+  mockJwksMode = 'ok';
+  _resetJwksCache();
 });
 
 // ---------------------------------------------------------------------------
@@ -60,6 +119,34 @@ async function req(method, path, body, headers = {}) {
   const json = await res.json();
   return { status: res.status, body: json };
 }
+
+/**
+ * Mint a GitHub Actions-style OIDC JWT using the test RSA private key.
+ * All fields default to valid values; pass overrides to test failure paths.
+ */
+async function mintOidcJwt({
+  sub        = 'repo:owner/repo:ref:refs/heads/main',
+  iss        = 'https://token.actions.githubusercontent.com',
+  aud        = 'governor-os',
+  expiresIn  = '5m',
+  signingKey = null, // defaults to testPrivateKey — set after before() runs
+  kid        = 'test-key-1',
+} = {}) {
+  const key = signingKey ?? testPrivateKey;
+  return new SignJWT({ sub })
+    .setProtectedHeader({ alg: 'RS256', kid })
+    .setIssuer(iss)
+    .setAudience(aud)
+    .setIssuedAt()
+    .setExpirationTime(expiresIn)
+    .sign(key);
+}
+
+const VALID_VERIFY_BODY = {
+  organizationId:   'acme-corp',
+  serviceAccountId: 'ci-service',
+  federationRuleId: 'repo:owner/repo',
+};
 
 const VALID_AUDIT_PAYLOAD = {
   schemaVersion: '1.0',
@@ -131,6 +218,23 @@ describe('POST /api/v1/compliance/audit — auth', () => {
     );
     assert.equal(status, 202);
     delete process.env.LICENSE_SECRET;
+  });
+
+  test('accepts request when bearer token is a valid session token', async () => {
+    // Obtain a session token via the verify endpoint
+    const oidcToken = await mintOidcJwt();
+    const { body: vBody } = await req('POST', '/api/v1/compliance/verify', {
+      ...VALID_VERIFY_BODY,
+      oidcToken,
+    });
+    assert.equal(vBody.success, true, 'Expected verify to succeed');
+
+    // Use the session token to authenticate an audit request
+    const { status } = await req(
+      'POST', '/api/v1/compliance/audit', VALID_AUDIT_PAYLOAD,
+      { Authorization: `Bearer ${vBody.sessionToken}` }
+    );
+    assert.equal(status, 202);
   });
 });
 
@@ -277,10 +381,10 @@ describe('GET /api/v1/compliance/audit/:jobId', () => {
 });
 
 // ---------------------------------------------------------------------------
-// POST /api/v1/compliance/verify
+// POST /api/v1/compliance/verify — input validation
 // ---------------------------------------------------------------------------
 
-describe('POST /api/v1/compliance/verify', () => {
+describe('POST /api/v1/compliance/verify — validation', () => {
   test('returns 400 when required fields are missing', async () => {
     const { status, body } = await req('POST', '/api/v1/compliance/verify', {
       oidcToken: 'tok',
@@ -290,18 +394,92 @@ describe('POST /api/v1/compliance/verify', () => {
     assert.equal(status, 400);
     assert.equal(body.success, false);
   });
+});
 
-  test('returns 200 with session token when all fields are present', async () => {
+// ---------------------------------------------------------------------------
+// POST /api/v1/compliance/verify — OIDC verification
+// ---------------------------------------------------------------------------
+
+describe('POST /api/v1/compliance/verify — OIDC', () => {
+  test('returns 200 with a signed session token for a valid OIDC JWT', async () => {
+    const oidcToken = await mintOidcJwt();
     const { status, body } = await req('POST', '/api/v1/compliance/verify', {
-      oidcToken:        'fake-jwt-token',
-      organizationId:   'acme-corp',
-      serviceAccountId: 'ci-service',
-      federationRuleId: 'rule-1',
+      ...VALID_VERIFY_BODY,
+      oidcToken,
     });
     assert.equal(status, 200);
     assert.equal(body.success, true);
-    assert.ok(body.sessionToken);
-    assert.ok(body.expiresIn > 0);
+    assert.ok(body.sessionToken, 'Expected sessionToken in response');
+    // Session token must be a JWT (three dot-separated parts)
+    assert.equal(body.sessionToken.split('.').length, 3);
+    assert.equal(body.expiresIn, 3600);
+    assert.ok(body.message);
+  });
+
+  test('returns 401 when OIDC JWT has an invalid signature', async () => {
+    // Sign with wrongPrivateKey — not in the mock JWKS
+    const oidcToken = await mintOidcJwt({ signingKey: wrongPrivateKey });
+    const { status, body } = await req('POST', '/api/v1/compliance/verify', {
+      ...VALID_VERIFY_BODY,
+      oidcToken,
+    });
+    assert.equal(status, 401);
+    assert.equal(body.success, false);
+  });
+
+  test('returns 401 for an expired OIDC JWT', async () => {
+    // Issue a token that expired in the past (-1s from now)
+    const oidcToken = await mintOidcJwt({ expiresIn: '-1s' });
+    const { status, body } = await req('POST', '/api/v1/compliance/verify', {
+      ...VALID_VERIFY_BODY,
+      oidcToken,
+    });
+    assert.equal(status, 401);
+    assert.equal(body.success, false);
+  });
+
+  test('returns 401 when iss does not match', async () => {
+    const oidcToken = await mintOidcJwt({ iss: 'https://evil.example.com' });
+    const { status, body } = await req('POST', '/api/v1/compliance/verify', {
+      ...VALID_VERIFY_BODY,
+      oidcToken,
+    });
+    assert.equal(status, 401);
+    assert.equal(body.success, false);
+  });
+
+  test('returns 401 when aud does not match', async () => {
+    const oidcToken = await mintOidcJwt({ aud: 'wrong-audience' });
+    const { status, body } = await req('POST', '/api/v1/compliance/verify', {
+      ...VALID_VERIFY_BODY,
+      oidcToken,
+    });
+    assert.equal(status, 401);
+    assert.equal(body.success, false);
+  });
+
+  test('returns 401 when sub does not match federationRuleId', async () => {
+    // sub starts with 'repo:other/repo' but federationRuleId expects 'repo:owner/repo'
+    const oidcToken = await mintOidcJwt({ sub: 'repo:other/repo:ref:refs/heads/main' });
+    const { status, body } = await req('POST', '/api/v1/compliance/verify', {
+      ...VALID_VERIFY_BODY,
+      oidcToken,
+      federationRuleId: 'repo:owner/repo',
+    });
+    assert.equal(status, 401);
+    assert.equal(body.success, false);
+  });
+
+  test('returns 503 when JWKS endpoint is unreachable', async () => {
+    mockJwksMode = 'error';
+    _resetJwksCache();
+    const oidcToken = await mintOidcJwt();
+    const { status, body } = await req('POST', '/api/v1/compliance/verify', {
+      ...VALID_VERIFY_BODY,
+      oidcToken,
+    });
+    assert.equal(status, 503);
+    assert.equal(body.success, false);
   });
 });
 
