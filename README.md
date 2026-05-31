@@ -83,9 +83,16 @@ a release was checked against the checklist at publish time.
 | `compliance-profile` | no | Compliance framework: `iso27001`, `soc2`, `dora`, or `general` (default). |
 | `report-path` | no | Path to write the JSON compliance report. Omit to skip. |
 | `fail-on-incomplete` | no | Fail the job if the checklist does not pass (default `false`). |
-| `license-key` | no | Enables the (stubbed) premium audit bridge. |
+| `license-key` | no | Enables the premium audit bridge (requires `COMPLIANCE_BACKEND_URL`). |
 
-Outputs: `passed`, `score`, `tier`, and `report-path` (set when a report was written).
+| Output | Description |
+| --- | --- |
+| `passed` | `'true'` if the release satisfied the basic compliance checklist, otherwise `'false'`. |
+| `score` | Number of checklist items passed out of the total (e.g. `3/3`). |
+| `tier` | Which tier ran: `'free'` or `'premium'`. |
+| `profile` | Compliance profile that was evaluated: `'iso27001'`, `'soc2'`, `'dora'`, or `'default'`. |
+| `report-path` | Path of the written JSON compliance report, if `report-path` input was provided. |
+| `audit-verdict` | **Premium only.** Governance verdict from the backend: `'approved'`, `'conditional'`, or `'blocked'`. |
 
 ## Deploy the backend
 
@@ -119,8 +126,9 @@ this container:
   with:
     github-token: ${{ secrets.GITHUB_TOKEN }}
     license-key: ${{ secrets.GOVERNOR_LICENSE_KEY }}
+  env:
     # URL of your self-hosted Governor OS backend:
-    # backend-url: https://compliance.your-company.com
+    COMPLIANCE_BACKEND_URL: ${{ secrets.COMPLIANCE_BACKEND_URL }}
 ```
 
 ### Environment variables
@@ -128,11 +136,108 @@ this container:
 | Variable | Default | Description |
 | --- | --- | --- |
 | `PORT` | `3000` | HTTP port the server binds to |
-| `LICENSE_SECRET` | — | Secret for signing session tokens (**required in production**) |
+| `LICENSE_SECRET` | — | The license key that the server accepts from the action. Set this to the same value you place in `secrets.GOVERNOR_LICENSE_KEY`. The server validates incoming `Authorization: Bearer <key>` headers against this value using a timing-safe comparison. When unset, the server accepts **any** non-empty key (development mode only — always set this in production). |
 | `DATABASE_URL` | — | PostgreSQL connection string (future) |
 | `GITHUB_OIDC_JWKS_URL` | GitHub default | Override for GitHub Enterprise |
 
 Copy `web/.env.example` to `web/.env` and fill in secrets. Never commit `.env`.
+
+---
+
+## Premium tier
+
+Once the backend is deployed, add `license-key` and `COMPLIANCE_BACKEND_URL` to
+your workflow to enable the premium audit bridge. The action will submit release
+metadata to the backend, poll until the audit job completes, and expose the
+governance verdict as the `audit-verdict` output.
+
+### Full workflow example
+
+```yaml
+name: Release Compliance (Premium)
+on:
+  release:
+    types: [published]
+
+jobs:
+  compliance:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run Governor OS compliance audit
+        id: compliance
+        uses: markgrendev/automated-release-compliance-action@dev
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          compliance-profile: iso27001
+          license-key: ${{ secrets.GOVERNOR_LICENSE_KEY }}
+          report-path: compliance-report.json
+          fail-on-incomplete: "true"
+        env:
+          COMPLIANCE_BACKEND_URL: ${{ secrets.COMPLIANCE_BACKEND_URL }}
+
+      - name: Enforce governance verdict
+        if: steps.compliance.outputs.audit-verdict == 'blocked'
+        run: |
+          echo "Deployment blocked by Governor OS governance audit."
+          exit 1
+
+      - name: Log audit result
+        run: |
+          echo "Tier: ${{ steps.compliance.outputs.tier }}"
+          echo "Profile: ${{ steps.compliance.outputs.profile }}"
+          echo "Passed: ${{ steps.compliance.outputs.passed }}"
+          echo "Score: ${{ steps.compliance.outputs.score }}"
+          echo "Verdict: ${{ steps.compliance.outputs.audit-verdict }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-compliance-report
+          path: compliance-report.json
+```
+
+Set `COMPLIANCE_BACKEND_URL` as a repository secret pointing to your deployed
+backend (e.g. `https://compliance.your-company.com`). The action reads this
+environment variable automatically — no additional `backend-url` input is
+required.
+
+### Governance verdicts
+
+| Verdict | Meaning |
+| --- | --- |
+| `approved` | Release is a fully-published, non-draft production release. All governance controls are satisfied. Safe to deploy. |
+| `conditional` | Release is a pre-release. Reduced controls apply. Manual review recommended before promoting to production. |
+| `blocked` | Release is a draft. The audit cannot be approved until the release is published. Block deployment. |
+
+The `audit-verdict` output is only set when the premium tier runs (i.e., when
+`license-key` is provided and `COMPLIANCE_BACKEND_URL` is reachable). On the
+free tier the output is an empty string.
+
+### Audit result structure
+
+The backend returns a JSON job result that is summarised in the action workflow
+run. The key fields are:
+
+```jsonc
+{
+  "auditTrailId": "audit-acme_widgets-v1.2.0-1748692800000",
+  "repository":   "acme/widgets",
+  "release": {
+    "tag":         "v1.2.0",
+    "publishedAt": "2026-05-31T12:00:00.000Z",
+    "author":      "octocat"
+  },
+  "governanceVerdict": {
+    "verdict": "approved",                            // "approved" | "conditional" | "blocked"
+    "reason":  "Release meets Governor OS governance requirements."
+  },
+  "isoControlMapping": {
+    "CC6.1": "Change management: Release tag and metadata captured.",
+    "CC7.2": "System monitoring: CI workflow completion linked to release.",
+    "CC8.1": "Change management: Release notes and issue references reviewed."
+  },
+  "completedAt": "2026-05-31T12:00:01.234Z"
+}
+```
 
 ---
 
