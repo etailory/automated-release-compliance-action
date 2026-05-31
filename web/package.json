@@ -6,10 +6,17 @@
   "type": "module",
   "scripts": {
     "start": "node server.js",
-    "dev": "node --watch server.js"
+    "dev": "node --watch server.js",
+    "lint:openapi": "redocly lint openapi.yaml",
+    "test": "npm run lint:openapi && node --test server.test.js"
   },
   "dependencies": {
-    "express": "^4.19.2"
+    "express": "^4.19.2",
+    "express-rate-limit": "^7.5.0",
+    "jose": "^6.2.3"
+  },
+  "devDependencies": {
+    "@redocly/cli": "^1.0.0"
   },
   "engines": {
     "node": ">=20"

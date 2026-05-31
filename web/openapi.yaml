@@ -1,0 +1,1290 @@
+openapi: "3.0.3"
+
+info:
+  title: Governor OS Web API
+  description: |
+    REST API for the Governor OS compliance platform.
+
+    Regulated-industry customers (Fintech, MedTech, GovTech) use this API to:
+    - Verify GitHub Actions OIDC tokens and obtain session tokens
+    - Submit release metadata for compliance audit and governance verdict generation
+    - Retrieve audit job status and results
+    - Manage the organization registry (admin operations)
+
+    Security model:
+    - Audit and verify endpoints accept a `Bearer` token that is either a
+      short-lived HMAC-signed session token (obtained via `/api/v1/compliance/verify`)
+      or a long-lived license key.
+    - Admin endpoints accept a `Bearer` token matching the `ADMIN_SECRET`
+      environment variable. When `ADMIN_SECRET` is not configured the endpoints
+      return `503 Service Unavailable`.
+  version: "1.0.0"
+  contact:
+    name: Governor OS Support
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+
+servers:
+  - url: http://localhost:3000
+    description: Local development / self-hosted container (docker compose up)
+  - url: https://compliance.your-company.com
+    description: Production self-hosted deployment — replace with your actual URL
+
+tags:
+  - name: health
+    description: Server liveness check
+  - name: compliance
+    description: OIDC verification and audit trail generation
+  - name: admin
+    description: Organization registry and job management (requires ADMIN_SECRET)
+
+# ---------------------------------------------------------------------------
+# Reusable security schemes
+# ---------------------------------------------------------------------------
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        For compliance endpoints: a short-lived session JWT (from `/api/v1/compliance/verify`)
+        or a long-lived license key.
+
+        For admin endpoints: the value of the `ADMIN_SECRET` environment variable.
+
+  # ---------------------------------------------------------------------------
+  # Reusable schemas
+  # ---------------------------------------------------------------------------
+
+  schemas:
+
+    ErrorResponse:
+      type: object
+      required: [success, error]
+      properties:
+        success:
+          type: boolean
+          enum: [false]
+          example: false
+        error:
+          type: string
+          description: Human-readable error message
+          example: "Missing required fields: oidcToken, organizationId, serviceAccountId, federationRuleId"
+
+    OrgEntry:
+      type: object
+      required: [id, allowedSubs]
+      properties:
+        id:
+          type: string
+          description: Unique organization identifier
+          example: "acme-corp"
+        allowedSubs:
+          type: array
+          items:
+            type: string
+          description: |
+            OIDC `sub` claim patterns. Trailing-wildcard globs are supported
+            (e.g. `"repo:acme/*"`).
+          example: ["repo:acme/backend:*", "repo:acme/frontend:*"]
+
+    OrgRegistrationRequest:
+      type: object
+      required: [id, licenseKey, allowedSubs]
+      properties:
+        id:
+          type: string
+          description: Unique organization identifier
+          example: "acme-corp"
+        licenseKey:
+          type: string
+          description: License key issued to the organization. Write-only — never returned by GET endpoints.
+          example: "gos_live_abc123def456"
+        allowedSubs:
+          type: array
+          minItems: 1
+          items:
+            type: string
+          description: |
+            OIDC `sub` claim patterns allowed for this organization.
+            Trailing-wildcard globs are supported (e.g. `"repo:acme/*"`).
+          example: ["repo:acme/backend:*", "repo:acme/frontend:*"]
+
+    AuditJobSummary:
+      type: object
+      required: [jobId, repository, tag, status, submittedAt]
+      properties:
+        jobId:
+          type: string
+          description: Unique audit job identifier
+          example: "audit-acme_widgets-v1.2.0-1748692800000"
+        repository:
+          type: string
+          description: GitHub repository in `owner/repo` format
+          example: "acme/widgets"
+        tag:
+          type: string
+          description: Release tag
+          example: "v1.2.0"
+        status:
+          type: string
+          enum: [queued, complete]
+          example: "complete"
+        submittedAt:
+          type: string
+          format: date-time
+          example: "2026-05-31T12:00:00.000Z"
+        completedAt:
+          type: string
+          format: date-time
+          example: "2026-05-31T12:00:01.234Z"
+
+    GovernanceVerdict:
+      type: object
+      required: [verdict, reason]
+      properties:
+        verdict:
+          type: string
+          enum: [approved, conditional, blocked]
+          description: |
+            - `approved` — fully published, non-draft production release
+            - `conditional` — pre-release; manual review recommended
+            - `blocked` — draft release; cannot be approved until published
+          example: "approved"
+        reason:
+          type: string
+          example: "Release meets Governor OS governance requirements."
+
+    AuditResult:
+      type: object
+      required: [auditTrailId, repository, release, completedAt]
+      properties:
+        auditTrailId:
+          type: string
+          example: "audit-acme_widgets-v1.2.0-1748692800000"
+        repository:
+          type: string
+          example: "acme/widgets"
+        profile:
+          type: string
+          enum: [default, iso27001, soc2, dora]
+          description: Compliance framework used for the audit
+          example: "iso27001"
+        release:
+          type: object
+          required: [tag]
+          properties:
+            tag:
+              type: string
+              example: "v1.2.0"
+            publishedAt:
+              type: string
+              format: date-time
+              nullable: true
+              example: "2026-05-31T12:00:00.000Z"
+            author:
+              type: string
+              nullable: true
+              example: "octocat"
+        governanceVerdict:
+          $ref: '#/components/schemas/GovernanceVerdict'
+        controlMapping:
+          type: object
+          description: |
+            Profile-appropriate compliance control cross-reference (present when
+            `requested.isoControlMapping` is true). Keys use the control identifier
+            scheme for the requested profile:
+            - `iso27001`: ISO 27001 Annex A identifiers (e.g. `A.12.1.2`)
+            - `soc2`: SOC2 Trust Services Criteria (e.g. `CC6.1`)
+            - `dora`: DORA Article references (e.g. `Art.9`)
+            - `default`: Generic control codes (e.g. `CTRL-1`)
+          additionalProperties:
+            type: string
+          example:
+            A.12.1.2: "Change management: Release tag and metadata captured and reviewed."
+            A.14.2.2: "System change control: CI workflow completion linked to release."
+            A.14.2.8: "System security testing: Release notes and issue references reviewed."
+        evidencePdf:
+          type: object
+          description: Evidence PDF status (present when `requested.evidencePdf` is true)
+          properties:
+            status:
+              type: string
+              example: "pending"
+            message:
+              type: string
+              example: "PDF generation is not yet available in this tier."
+        completedAt:
+          type: string
+          format: date-time
+          example: "2026-05-31T12:00:01.234Z"
+
+    AuditJobResponse:
+      type: object
+      required: [success, jobId, status, message]
+      properties:
+        success:
+          type: boolean
+          example: true
+        jobId:
+          type: string
+          example: "audit-acme_widgets-v1.2.0-1748692800000"
+        status:
+          type: string
+          enum: [queued, complete]
+          example: "complete"
+        message:
+          type: string
+          example: "Audit complete for acme/widgets@v1.2.0."
+        result:
+          $ref: '#/components/schemas/AuditResult'
+
+# ---------------------------------------------------------------------------
+# Paths
+# ---------------------------------------------------------------------------
+
+paths:
+
+  /health:
+    get:
+      tags: [health]
+      summary: Server health check
+      description: Returns `200 OK` with service metadata when the server is healthy.
+      operationId: getHealth
+      security: []
+      responses:
+        "200":
+          description: Server is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, service, version]
+                properties:
+                  status:
+                    type: string
+                    enum: [ok]
+                    example: "ok"
+                  service:
+                    type: string
+                    example: "governor-os-web"
+                  version:
+                    type: string
+                    example: "1.0.0"
+
+  /openapi.yaml:
+    get:
+      tags: [health]
+      summary: OpenAPI specification
+      description: Returns this OpenAPI 3.0 specification document as `text/yaml`.
+      operationId: getOpenApiSpec
+      security: []
+      responses:
+        "200":
+          description: OpenAPI spec document
+          content:
+            text/yaml:
+              schema:
+                type: string
+        "503":
+          description: Spec file unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /docs:
+    get:
+      tags: [health]
+      summary: API documentation viewer
+      description: Renders the OpenAPI 3.0 specification as an interactive Redoc HTML page.
+      operationId: getDocs
+      security: []
+      responses:
+        "200":
+          description: Redoc HTML documentation page
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /api/v1/compliance/verify:
+    post:
+      tags: [compliance]
+      summary: Verify GitHub Actions OIDC token and issue session token
+      description: |
+        Validates the short-lived OIDC JWT issued by GitHub Actions against the
+        GitHub JWKS endpoint, then issues an HMAC-signed session token valid for
+        1 hour. The session token can be used as the `Authorization: Bearer`
+        credential for subsequent audit calls.
+
+        **Rate limit:** 10 requests per 5 minutes per IP.
+      operationId: verifyOidc
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [oidcToken, organizationId, serviceAccountId, federationRuleId]
+              properties:
+                oidcToken:
+                  type: string
+                  description: Short-lived GitHub Actions OIDC JWT
+                  example: "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9..."
+                organizationId:
+                  type: string
+                  description: Governor OS tenant identifier
+                  example: "acme-corp"
+                serviceAccountId:
+                  type: string
+                  description: CI service account identifier
+                  example: "ci-release-bot"
+                federationRuleId:
+                  type: string
+                  description: OIDC `sub` prefix or pattern to match
+                  example: "repo:acme/widgets:"
+      responses:
+        "200":
+          description: OIDC token verified; session token issued
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, sessionToken, expiresIn, message]
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  sessionToken:
+                    type: string
+                    description: HMAC-signed JWT valid for 1 hour
+                    example: "eyJhbGciOiJIUzI1NiJ9..."
+                  expiresIn:
+                    type: integer
+                    description: Token lifetime in seconds
+                    example: 3600
+                  message:
+                    type: string
+                    example: "OIDC token verified. Session token issued."
+        "400":
+          description: Missing or invalid request fields
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "401":
+          description: OIDC token verification failed or sub does not match federation rule
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "403":
+          description: Organization not registered in the registry
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "429":
+          description: Rate limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "503":
+          description: JWKS endpoint temporarily unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/compliance/audit:
+    post:
+      tags: [compliance]
+      summary: Submit a release for compliance audit
+      description: |
+        Receives release metadata from the GitHub Action (premium tier) and
+        synchronously generates a governance verdict with ISO control mapping.
+        Returns a job ID immediately with `202 Accepted`; poll the
+        `GET /api/v1/compliance/audit/{jobId}` endpoint to retrieve the result.
+
+        **Authentication:** `Authorization: Bearer <session-token | license-key>`
+
+        **Rate limit:** 30 requests per minute per IP.
+      operationId: submitAudit
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [schemaVersion, repository, release]
+              properties:
+                schemaVersion:
+                  type: string
+                  description: Payload schema version for forward compatibility
+                  example: "1.0"
+                repository:
+                  type: string
+                  description: GitHub repository in `owner/repo` format
+                  example: "acme/widgets"
+                profile:
+                  type: string
+                  enum: [default, iso27001, soc2, dora]
+                  description: |
+                    Compliance framework the free-tier checklist was evaluated against.
+                    Determines which control identifier scheme is used in the
+                    `controlMapping` response field.
+                  default: "default"
+                  example: "iso27001"
+                release:
+                  type: object
+                  required: [tag]
+                  properties:
+                    tag:
+                      type: string
+                      example: "v1.2.0"
+                    name:
+                      type: string
+                      example: "Spring Release"
+                    isPrerelease:
+                      type: boolean
+                      example: false
+                    isDraft:
+                      type: boolean
+                      example: false
+                    publishedAt:
+                      type: string
+                      format: date-time
+                      nullable: true
+                      example: "2026-05-31T12:00:00.000Z"
+                    author:
+                      type: string
+                      nullable: true
+                      example: "octocat"
+                requested:
+                  type: object
+                  description: Optional flags to request additional audit artifacts
+                  properties:
+                    isoControlMapping:
+                      type: boolean
+                      description: |
+                        Include a compliance control cross-reference in the result
+                        (`controlMapping` field). The control identifiers used depend on
+                        the `profile` field (ISO 27001 Annex A, SOC2 CC, DORA Articles,
+                        or generic CTRL codes).
+                      default: false
+                      example: true
+                    evidencePdf:
+                      type: boolean
+                      description: Request a PDF evidence bundle (availability depends on tier)
+                      default: false
+                      example: false
+                    governanceVerdict:
+                      type: boolean
+                      description: Include governance verdict (default true)
+                      default: true
+                      example: true
+      responses:
+        "202":
+          description: Audit job accepted and queued
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, jobId, status, message]
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  jobId:
+                    type: string
+                    example: "audit-acme_widgets-v1.2.0-1748692800000"
+                  status:
+                    type: string
+                    enum: [queued]
+                    example: "queued"
+                  message:
+                    type: string
+                    example: "Compliance audit job queued for acme/widgets@v1.2.0. Poll GET /api/v1/compliance/audit/audit-acme_widgets-v1.2.0-1748692800000 for status."
+        "400":
+          description: |
+            Missing required fields (schemaVersion, repository, or release.tag), or in
+            registry-enforced multi-tenant mode the `repository` owner does not match
+            the authenticated organization's `orgId`. The token is valid — the payload
+            is malformed relative to the caller's identity.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "401":
+          description: Missing or invalid Authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "403":
+          description: Organization has been evicted or is not registered
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "429":
+          description: Rate limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/compliance/audit/{jobId}:
+    get:
+      tags: [compliance]
+      summary: Retrieve audit job status and result
+      description: |
+        Returns the current status and full result of a compliance audit job.
+        Jobs are retained in memory for 24 hours; after that the response is
+        `410 Gone`. Jobs from prior server process runs are read from the durable
+        NDJSON audit log file.
+
+        **Authentication (enforcement mode):** When `LICENSE_SECRET` is set or the
+        organization registry is non-empty, the request must include a valid
+        `Authorization: Bearer <session-token|license-key>` header. In development
+        / free-tier mode (neither condition active) the endpoint is open.
+
+        **Org scope (enforcement mode):** When the authenticated token carries an
+        `orgId` (registry-enforced multi-tenant mode), the job's repository owner
+        must match the authenticated organization. Cross-org access returns `403`.
+        Single-tenant `LICENSE_SECRET` mode (`orgId` is null) is exempt.
+
+        **Rate limit:** 60 requests per minute per IP.
+      operationId: getAuditJob
+      security:
+        - BearerAuth: []
+        - {}  # security is optional — open in dev/free-tier mode
+      parameters:
+        - name: jobId
+          in: path
+          required: true
+          schema:
+            type: string
+          description: The job ID returned by `POST /api/v1/compliance/audit`
+          example: "audit-acme_widgets-v1.2.0-1748692800000"
+      responses:
+        "200":
+          description: Audit job found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditJobResponse'
+        "401":
+          description: Missing or invalid Authorization header (enforcement mode only)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "403":
+          description: |
+            Organization not registered / evicted, or cross-org access denied
+            (job belongs to a different organization).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "404":
+          description: Job ID not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "410":
+          description: Job has expired and been evicted (was present within the last 24 hours)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "429":
+          description: Rate limit exceeded (60 requests per minute per IP)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/compliance/audits:
+    get:
+      tags: [compliance]
+      summary: List audit history for the authenticated organization
+      description: |
+        Returns audit jobs from the durable NDJSON log for the authenticated
+        organization, sorted newest first.
+
+        **Authentication (enforcement mode):** When `LICENSE_SECRET` is set or
+        the organization registry is non-empty, a valid
+        `Authorization: Bearer <session-token|license-key>` header is required.
+        In development / free-tier mode (neither active) the endpoint is open.
+
+        **Org scope (enforcement mode):** When the authenticated token carries
+        an `orgId` (registry-enforced multi-tenant mode), only jobs whose
+        repository owner matches the authenticated organization are returned.
+        Single-tenant `LICENSE_SECRET` mode (`orgId` is null) returns all jobs.
+
+        **Filtering:** Use `?repository=owner/repo` to restrict results to a
+        specific repository (exact match).
+
+        **Pagination:** Use `?limit` (default 50, max 200) and `?offset`
+        (default 0) to page through results. The response includes a
+        `pagination` object with `total`, `limit`, `offset`, and `hasMore`.
+
+        **Rate limit:** 30 requests per minute per IP.
+      operationId: listAudits
+      security:
+        - BearerAuth: []
+        - {}  # security is optional — open in dev/free-tier mode
+      parameters:
+        - name: repository
+          in: query
+          required: false
+          schema:
+            type: string
+          description: |
+            Filter by repository in `owner/repo` format (exact match).
+            When omitted, all repositories accessible to the authenticated caller are returned.
+          example: "acme/widgets"
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+          description: Maximum number of audit jobs to return per page (default 50, max 200)
+          example: 50
+        - name: offset
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+          description: Number of records to skip before returning results (default 0)
+          example: 0
+      responses:
+        "200":
+          description: Audit history returned successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, count, jobs, pagination]
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  count:
+                    type: integer
+                    description: Number of jobs returned in this page
+                    example: 3
+                  jobs:
+                    type: array
+                    items:
+                      type: object
+                      description: NDJSON audit log record with integrity verification
+                      properties:
+                        jobId:
+                          type: string
+                          example: "audit-acme_widgets-v1.2.0-1748692800000"
+                        repository:
+                          type: string
+                          example: "acme/widgets"
+                        tag:
+                          type: string
+                          example: "v1.2.0"
+                        status:
+                          type: string
+                          enum: [queued, complete]
+                          example: "complete"
+                        submittedAt:
+                          type: string
+                          format: date-time
+                          example: "2026-05-31T12:00:00.000Z"
+                        completedAt:
+                          type: string
+                          format: date-time
+                          example: "2026-05-31T12:00:01.234Z"
+                        sig:
+                          type: string
+                          description: |
+                            HMAC-SHA256 hex digest over the canonical JSON of core fields
+                            (`jobId`, `repository`, `tag`, `submittedAt`, `completedAt`,
+                            `status`, `result.governanceVerdict.verdict`). Derived from
+                            `SESSION_SECRET`. Use `verified` to check tamper evidence
+                            without recomputing the HMAC yourself.
+                          example: "a3f1c2d4e5..."
+                        verified:
+                          type: boolean
+                          description: |
+                            `true` when the `sig` field matches the server-computed HMAC
+                            for this record. `false` when the record has no `sig` (written
+                            before signature support was added) or when the signature does
+                            not match (indicating possible tampering).
+                          example: true
+                        result:
+                          $ref: '#/components/schemas/AuditResult'
+                    description: |
+                      Array of audit log records sorted by `submittedAt` descending
+                      (newest first). Each record mirrors the shape written to the
+                      NDJSON audit log by `POST /api/v1/compliance/audit`, augmented
+                      with a `verified` field indicating HMAC integrity status.
+                  pagination:
+                    type: object
+                    required: [total, limit, offset, hasMore]
+                    description: Pagination metadata for the current response
+                    properties:
+                      total:
+                        type: integer
+                        description: Total number of records matching the current filters (before pagination)
+                        example: 42
+                      limit:
+                        type: integer
+                        description: Maximum records per page (as requested or defaulted)
+                        example: 50
+                      offset:
+                        type: integer
+                        description: Number of records skipped (as requested or defaulted)
+                        example: 0
+                      hasMore:
+                        type: boolean
+                        description: Whether there are more records beyond this page
+                        example: false
+        "400":
+          description: Invalid `limit` query parameter
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "401":
+          description: Missing or invalid Authorization header (enforcement mode only)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "403":
+          description: Organization not registered or evicted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "429":
+          description: Rate limit exceeded (30 requests per minute per IP)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/compliance/audits/export:
+    get:
+      tags: [compliance]
+      summary: Export audit history as CSV or JSON
+      description: |
+        Returns a downloadable file containing all audit records matching the
+        caller's org scope. Designed for compliance officers who need to attach
+        dated evidence snapshots to SOC2, ISO 27001, or DORA audit packages.
+
+        **Format:** Use `?format=csv` (default) for a standard CSV file or
+        `?format=json` for a JSON array. Both contain the same fields:
+        `jobId`, `repository`, `tag`, `profile`, `verdict`, `submittedAt`,
+        `completedAt`.
+
+        **Authentication (enforcement mode):** When `LICENSE_SECRET` is set or
+        the organization registry is non-empty, a valid
+        `Authorization: Bearer <session-token|license-key>` header is required.
+        In development / free-tier mode (neither active) the endpoint is open.
+
+        **Org scope (enforcement mode):** When the authenticated token carries
+        an `orgId` (registry-enforced multi-tenant mode), only records whose
+        repository owner matches the authenticated organization are exported.
+        Single-tenant `LICENSE_SECRET` mode exports all records.
+
+        **Filtering:** Use `?repository=owner/repo` (exact match), `?from=` and
+        `?to=` (ISO 8601 dates) to restrict records. Filters are applied on top
+        of the org-scope filter, not instead of it.
+
+        **Rate limit:** 30 requests per minute per IP.
+      operationId: exportAudits
+      security:
+        - BearerAuth: []
+        - {}  # security is optional — open in dev/free-tier mode
+      parameters:
+        - name: format
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [csv, json]
+            default: csv
+          description: Export format — `csv` (default) or `json`
+          example: csv
+        - name: repository
+          in: query
+          required: false
+          schema:
+            type: string
+          description: |
+            Filter by repository in `owner/repo` format (exact match).
+            Applied before org-scope filter, not instead of it.
+          example: "acme/widgets"
+        - name: from
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+          description: |
+            Inclusive lower bound on `submittedAt` (ISO 8601). Records submitted
+            before this date are excluded.
+          example: "2026-01-01T00:00:00Z"
+        - name: to
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+          description: |
+            Inclusive upper bound on `submittedAt` (ISO 8601). Records submitted
+            after this date are excluded.
+          example: "2026-12-31T23:59:59Z"
+      responses:
+        "200":
+          description: Export file returned
+          content:
+            text/csv:
+              schema:
+                type: string
+                description: |
+                  CSV file with columns: `jobId, repository, tag, profile,
+                  verdict, submittedAt, completedAt, verified`. Header row is always
+                  present even when there are no records. The `verified` column
+                  contains `true` or `false` indicating HMAC integrity status.
+            application/json:
+              schema:
+                type: array
+                description: JSON array of audit records (same fields as CSV)
+                items:
+                  type: object
+                  required: [jobId, repository, tag, profile, verdict, submittedAt, completedAt, verified]
+                  properties:
+                    jobId:
+                      type: string
+                      example: "audit-acme_widgets-v1.2.0-1748692800000"
+                    repository:
+                      type: string
+                      example: "acme/widgets"
+                    tag:
+                      type: string
+                      example: "v1.2.0"
+                    profile:
+                      type: string
+                      enum: [default, iso27001, soc2, dora]
+                      example: "iso27001"
+                    verdict:
+                      type: string
+                      enum: [approved, conditional, blocked, ""]
+                      example: "approved"
+                    submittedAt:
+                      type: string
+                      format: date-time
+                      example: "2026-05-31T12:00:00.000Z"
+                    completedAt:
+                      type: string
+                      format: date-time
+                      example: "2026-05-31T12:00:01.234Z"
+                    verified:
+                      type: boolean
+                      description: |
+                        `true` when the record's HMAC-SHA256 integrity signature is
+                        valid. `false` for records written before signature support
+                        was added, or if tampering is detected.
+                      example: true
+        "400":
+          description: Invalid `format`, `from`, or `to` query parameter
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "401":
+          description: Missing or invalid Authorization header (enforcement mode only)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "403":
+          description: Organization not registered or evicted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "429":
+          description: Rate limit exceeded (30 requests per minute per IP)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/compliance/audits/verify:
+    get:
+      tags: [compliance]
+      summary: Verify audit log integrity
+      description: |
+        Verifies the HMAC-SHA256 integrity signature of every audit log record
+        that matches the caller's org scope and optional filters. Returns a
+        machine-readable report suitable for handing to external auditors as
+        evidence that no records have been tampered with since they were written.
+
+        **Integrity values:**
+        - `"ok"` — all records have a valid signature (vacuously true for an empty log)
+        - `"compromised"` — at least one record has a signature that does not verify
+          (tamper detected)
+        - `"partial"` — no tampered records, but some records have no signature
+          (written before HMAC support was introduced)
+
+        **Authentication (enforcement mode):** When `LICENSE_SECRET` is set or
+        the organization registry is non-empty, a valid
+        `Authorization: Bearer <session-token|license-key>` header is required.
+        In development / free-tier mode (neither active) the endpoint is open.
+
+        **Org scope (enforcement mode):** When the authenticated token carries
+        an `orgId` (registry-enforced multi-tenant mode), only records whose
+        repository owner matches the authenticated organization are verified.
+        Single-tenant `LICENSE_SECRET` mode verifies all records.
+
+        **Filtering:** Use `?repository=owner/repo` (exact match), `?from=` and
+        `?to=` (ISO 8601 dates) to restrict records. Filters are applied on top
+        of the org-scope filter, not instead of it.
+
+        **Rate limit:** 30 requests per minute per IP.
+      operationId: verifyAuditIntegrity
+      security:
+        - BearerAuth: []
+        - {}  # security is optional — open in dev/free-tier mode
+      parameters:
+        - name: repository
+          in: query
+          required: false
+          schema:
+            type: string
+          description: |
+            Filter by repository in `owner/repo` format (exact match).
+            When omitted, all repositories accessible to the authenticated caller are verified.
+          example: "acme/widgets"
+        - name: from
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+          description: |
+            Inclusive lower bound on `submittedAt` (ISO 8601). Records submitted
+            before this date are excluded from the integrity check.
+          example: "2026-01-01T00:00:00Z"
+        - name: to
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+          description: |
+            Inclusive upper bound on `submittedAt` (ISO 8601). Records submitted
+            after this date are excluded from the integrity check.
+          example: "2026-12-31T23:59:59Z"
+      responses:
+        "200":
+          description: Integrity report generated successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, verifiedAt, total, verified, failed, integrity, records]
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  verifiedAt:
+                    type: string
+                    format: date-time
+                    description: Timestamp when the integrity check was performed
+                    example: "2026-05-31T12:00:00.000Z"
+                  total:
+                    type: integer
+                    description: Total number of records checked
+                    example: 42
+                  verified:
+                    type: integer
+                    description: Number of records whose HMAC signature is valid
+                    example: 42
+                  failed:
+                    type: integer
+                    description: Number of records with a missing or invalid signature
+                    example: 0
+                  integrity:
+                    type: string
+                    enum: [ok, compromised, partial]
+                    description: |
+                      - `ok` — all records verified (or log is empty)
+                      - `compromised` — at least one record has a sig that does not verify
+                      - `partial` — no tampered records but some records have no sig (legacy)
+                    example: "ok"
+                  records:
+                    type: array
+                    description: Per-record integrity results
+                    items:
+                      type: object
+                      required: [jobId, repository, tag, submittedAt, verified]
+                      properties:
+                        jobId:
+                          type: string
+                          example: "audit-acme_widgets-v1.2.0-1748692800000"
+                        repository:
+                          type: string
+                          example: "acme/widgets"
+                        tag:
+                          type: string
+                          example: "v1.2.0"
+                        submittedAt:
+                          type: string
+                          format: date-time
+                          example: "2026-05-31T12:00:00.000Z"
+                        verified:
+                          type: boolean
+                          description: |
+                            `true` when the record's HMAC signature is valid.
+                            `false` when the record has no signature (unsigned legacy) or
+                            when the signature does not match (tampered).
+                          example: true
+        "400":
+          description: Invalid `from` or `to` query parameter
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "401":
+          description: Missing or invalid Authorization header (enforcement mode only)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "403":
+          description: Organization not registered or evicted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "429":
+          description: Rate limit exceeded (30 requests per minute per IP)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /admin/orgs:
+    post:
+      tags: [admin]
+      summary: Register or update an organization
+      description: |
+        Registers a new organization (or updates an existing one) in the runtime
+        registry without requiring a server restart. The change is immediately
+        persisted to the `ORGS_FILE` on disk.
+
+        **Authentication:** `Authorization: Bearer <ADMIN_SECRET>`
+      operationId: createOrg
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OrgRegistrationRequest'
+      responses:
+        "201":
+          description: Organization registered successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, message]
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  message:
+                    type: string
+                    example: "Organization 'acme-corp' registered."
+        "400":
+          description: Missing or invalid request fields
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "401":
+          description: Invalid or missing admin token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "503":
+          description: Admin endpoint disabled (ADMIN_SECRET not configured)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    get:
+      tags: [admin]
+      summary: List all registered organizations
+      description: |
+        Returns the full list of registered organizations. License keys are
+        intentionally omitted — they are write-only secrets.
+
+        **Authentication:** `Authorization: Bearer <ADMIN_SECRET>`
+      operationId: listOrgs
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: Array of registered organizations (license keys omitted)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/OrgEntry'
+        "401":
+          description: Invalid or missing admin token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "503":
+          description: Admin endpoint disabled (ADMIN_SECRET not configured)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /admin/orgs/{id}:
+    delete:
+      tags: [admin]
+      summary: Remove a registered organization
+      description: |
+        Removes the specified organization from the in-memory registry and
+        immediately flushes the updated registry to disk. Returns `204 No Content`
+        on success.
+
+        **Authentication:** `Authorization: Bearer <ADMIN_SECRET>`
+      operationId: deleteOrg
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Organization ID to remove
+          example: "acme-corp"
+      responses:
+        "204":
+          description: Organization removed successfully (no body)
+        "401":
+          description: Invalid or missing admin token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "404":
+          description: Organization not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "503":
+          description: Admin endpoint disabled (ADMIN_SECRET not configured)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /admin/audit-jobs:
+    get:
+      tags: [admin]
+      summary: List in-memory audit jobs
+      description: |
+        Returns a summary list of all in-memory audit jobs sorted by
+        `submittedAt` descending (newest first). The full `result` payload is
+        omitted to keep the response compact for ops dashboards.
+
+        Only jobs held in the current process's memory are returned; jobs from
+        prior process runs are not included (use the NDJSON audit log file for
+        historical queries).
+
+        **Authentication:** `Authorization: Bearer <ADMIN_SECRET>`
+      operationId: listAuditJobs
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: Array of audit job summaries
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/AuditJobSummary'
+        "401":
+          description: Invalid or missing admin token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "503":
+          description: Admin endpoint disabled (ADMIN_SECRET not configured)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'

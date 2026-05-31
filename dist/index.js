@@ -22715,187 +22715,55 @@ var github = __toESM(require_github(), 1);
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 
-// src/checklist.ts
-var ISSUE_REFERENCE = /(#\d+)|(\/issues\/\d+)|(\/pull\/\d+)|\b[A-Z][A-Z0-9]+-\d+\b/;
-var MIN_DESCRIPTION_WORDS = 8;
-var MIN_BODY_CHARS = 80;
-var CHANGELOG_HEADER = /^#{1,3}\s*(what'?s\s+changed|change\s*log|changes|breaking\s+changes|release\s+notes)/im;
-var SECURITY_NOTE = /security\s+(review|assessment|impact|note|scan|fix)|no\s+security\s+impact|cve[-\s]?\d|vulnerabilit/i;
-var TESTING_EVIDENCE = /tested|test\s+coverage|qa\s+sign[- ]?off|regression\s+test|test\s+plan|ci\s+pass/i;
-var RISK_IMPACT = /risk\s+(assessment|level|impact)|impact\s+(analysis|assessment)|rollback\s+plan|blast\s+radius|criticality|rto\b|rpo\b/i;
-var DEFAULT_RULES = [
-  {
-    id: "has-description",
-    label: "Release notes contain a description of the changes",
-    test: (body) => countWords(body) >= MIN_DESCRIPTION_WORDS
-  },
-  {
-    id: "has-issue-reference",
-    label: "Release notes link to an issue, pull request, or ticket",
-    test: (body) => ISSUE_REFERENCE.test(body)
-  },
-  {
-    id: "not-placeholder",
-    label: "Release notes are not an empty or auto-generated placeholder",
-    test: (body) => {
-      const normalized = body.trim().toLowerCase();
-      if (normalized.length === 0)
-        return false;
-      const placeholders = ["no changes", "tbd", "todo", "n/a", "wip"];
-      return !placeholders.includes(normalized);
+// src/commits.ts
+function extractAuthors(commits) {
+  return [
+    ...new Set(commits.map((c) => c.author?.login ?? c.commit.author?.name ?? "unknown"))
+  ];
+}
+async function fetchReleaseCommits(octokit, repo, tag, logger) {
+  try {
+    const { data: tags } = await octokit.rest.repos.listTags({
+      owner: repo.owner,
+      repo: repo.repo,
+      per_page: 100
+    });
+    const tagIndex = tags.findIndex((t) => t.name === tag);
+    if (tagIndex !== -1 && tagIndex + 1 < tags.length) {
+      const prevTag = tags[tagIndex + 1].name;
+      const { data: comparison } = await octokit.rest.repos.compareCommitsWithBasehead({
+        owner: repo.owner,
+        repo: repo.repo,
+        basehead: `${prevTag}...${tag}`
+      });
+      const commits2 = comparison.commits;
+      return {
+        count: commits2.length,
+        authors: extractAuthors(commits2),
+        shas: commits2.map((c) => c.sha)
+      };
     }
-  },
-  {
-    id: "has-changelog-section",
-    label: "Release notes include a changelog or 'What's Changed' section heading",
-    test: (body) => CHANGELOG_HEADER.test(body)
-  },
-  {
-    id: "meets-min-length",
-    label: `Release notes are at least ${MIN_BODY_CHARS} characters`,
-    test: (body) => body.trim().length >= MIN_BODY_CHARS
+    logger.warning(`No previous tag found before ${tag}; falling back to listing commits on ${tag}.`);
+    const { data: commits } = await octokit.rest.repos.listCommits({
+      owner: repo.owner,
+      repo: repo.repo,
+      sha: tag,
+      per_page: 100
+    });
+    return {
+      count: commits.length,
+      authors: extractAuthors(commits),
+      shas: commits.map((c) => c.sha)
+    };
+  } catch (err) {
+    logger.warning(`Could not fetch release commits: ${err.message}`);
+    return;
   }
-];
-var ISO27001_RULES = [
-  ...DEFAULT_RULES,
-  {
-    id: "has-security-note",
-    label: "Release notes acknowledge security review or confirm no security impact",
-    test: (body) => SECURITY_NOTE.test(body)
-  }
-];
-var SOC2_RULES = [
-  ...DEFAULT_RULES,
-  {
-    id: "has-testing-evidence",
-    label: "Release notes include evidence of testing or QA sign-off",
-    test: (body) => TESTING_EVIDENCE.test(body)
-  }
-];
-var DORA_RULES = [
-  ...DEFAULT_RULES,
-  {
-    id: "has-risk-impact",
-    label: "Release notes include a risk or impact assessment (DORA operational resilience)",
-    test: (body) => RISK_IMPACT.test(body)
-  }
-];
-function getRulesForProfile(profile) {
-  switch (profile) {
-    case "iso27001":
-      return ISO27001_RULES;
-    case "soc2":
-      return SOC2_RULES;
-    case "dora":
-      return DORA_RULES;
-    default:
-      return DEFAULT_RULES;
-  }
-}
-function countWords(text) {
-  if (!text)
-    return 0;
-  return text.trim().split(/\s+/).filter(Boolean).length;
-}
-function evaluateChecklist(body = "", ctx = {}, rules = DEFAULT_RULES) {
-  const safeBody = typeof body === "string" ? body : "";
-  const results = rules.map((rule) => ({
-    id: rule.id,
-    label: rule.label,
-    ok: Boolean(rule.test(safeBody, ctx))
-  }));
-  const score = results.filter((r) => r.ok).length;
-  return {
-    passed: score === results.length,
-    score,
-    total: results.length,
-    results
-  };
 }
 
-// src/premium.ts
-var BACKEND_ENDPOINT = process.env.COMPLIANCE_BACKEND_URL || "https://api.example-compliance.dev/v1/audits";
-function buildAuditPayload(release, repo) {
-  return {
-    schemaVersion: "1.0",
-    repository: `${repo.owner}/${repo.repo}`,
-    release: {
-      tag: release.tag,
-      name: release.name,
-      isPrerelease: release.isPrerelease,
-      isDraft: release.isDraft,
-      publishedAt: release.publishedAt,
-      author: release.author
-    },
-    requested: {
-      isoControlMapping: true,
-      evidencePdf: true,
-      governanceVerdict: true
-    }
-  };
-}
-async function dispatchToBackend(_licenseKey, _payload) {
-  return { status: "stubbed", queued: false };
-}
-async function runPremiumAudit({
-  licenseKey,
-  release,
-  repo,
-  logger
-}) {
-  if (!licenseKey) {
-    throw new Error("runPremiumAudit called without a license key");
-  }
-  logger.info("Premium tier detected — preparing secure compliance bridge.");
-  const payload = buildAuditPayload(release, repo);
-  logger.debug(`Prepared audit payload for ${payload.repository}@${release.tag}`);
-  logger.info(`Bridge target: ${BACKEND_ENDPOINT} (transmission is stubbed in the MVP — no data leaves the runner yet).`);
-  const result = await dispatchToBackend(licenseKey, payload);
-  logger.info(`Backend dispatch result: ${result.status}.`);
-  return { prepared: true, endpoint: BACKEND_ENDPOINT, payload };
-}
-
-// src/report.ts
-var REPORT_SCHEMA_VERSION = "1.0";
-var TOOL_NAME = "automated-release-compliance-action";
-var TOOL_VERSION = "0.1.0";
-function buildComplianceReport(params) {
-  const { release, repo, evaluation, tier, generatedAt, commits } = params;
-  const report = {
-    schemaVersion: REPORT_SCHEMA_VERSION,
-    generatedAt,
-    tool: { name: TOOL_NAME, version: TOOL_VERSION },
-    tier,
-    repository: `${repo.owner}/${repo.repo}`,
-    release: {
-      tag: release.tag,
-      name: release.name,
-      isPrerelease: release.isPrerelease,
-      isDraft: release.isDraft,
-      publishedAt: release.publishedAt,
-      author: release.author,
-      url: release.url
-    },
-    compliance: {
-      passed: evaluation.passed,
-      score: evaluation.score,
-      total: evaluation.total,
-      checks: evaluation.results.map((r) => ({ ...r }))
-    }
-  };
-  if (commits !== undefined) {
-    report.commits = commits;
-  }
-  return report;
-}
-function serializeReport(report) {
-  return `${JSON.stringify(report, null, 2)}
-`;
-}
-
-// src/index.ts
-function parseReleaseFromContext(context2) {
-  const payload = context2.payload ?? {};
+// src/context.ts
+function parseReleaseFromContext(context) {
+  const payload = context.payload ?? {};
   const release = payload.release;
   if (release) {
     return {
@@ -22912,7 +22780,7 @@ function parseReleaseFromContext(context2) {
       body: release.body || ""
     };
   }
-  const ref = payload.ref ?? context2.ref ?? "";
+  const ref = payload.ref ?? context.ref ?? "";
   const tag = ref.replace(/^refs\/tags\//, "");
   return {
     release: tag ? {
@@ -22922,53 +22790,320 @@ function parseReleaseFromContext(context2) {
       isPrerelease: false,
       isDraft: false,
       publishedAt: null,
-      author: context2.actor ?? null,
+      author: context.actor ?? null,
       url: null
     } : null,
     body: ""
   };
 }
-async function fetchReleaseCommits(octokit, repo, currentTag, logger) {
-  try {
-    const tagsResponse = await octokit.rest.repos.listTags({
-      owner: repo.owner,
-      repo: repo.repo,
-      per_page: 10
-    });
-    const tags = tagsResponse.data.map((t) => t.name);
-    const currentIndex = tags.indexOf(currentTag);
-    if (currentIndex === -1) {
-      logger.warning(`Tag ${currentTag} not found in recent tags list; skipping commit enrichment.`);
-      return;
+
+// src/checklist.ts
+var ISSUE_REFERENCE = /(#\d+)|(\/issues\/\d+)|(\/pull\/\d+)|\b[A-Z][A-Z0-9]+-\d+\b/;
+var ISSUE_REFERENCE_G = new RegExp(ISSUE_REFERENCE.source, "g");
+var MIN_DESCRIPTION_WORDS = 8;
+var MIN_BODY_CHARS = 80;
+var CHANGELOG_HEADER = /^#{1,3}\s*(what'?s\s+changed|change\s*log|changes|breaking\s+changes|release\s+notes)/im;
+var SECURITY_NOTE = /security\s+(review|assessment|impact|note|scan|fix)|no\s+security\s+impact|cve[-\s]?\d|vulnerabilit/i;
+var TESTING_EVIDENCE = /tested|test\s+coverage|qa\s+sign[- ]?off|regression\s+test|test\s+plan|ci\s+pass/i;
+var RISK_IMPACT = /risk\s+(assessment|level|impact)|impact\s+(analysis|assessment)|rollback\s+plan|blast\s+radius|criticality|rto\b|rpo\b/i;
+var DEFAULT_RULES = [
+  {
+    id: "has-description",
+    label: "Release notes contain a description of the changes",
+    controlRef: "CTRL-1",
+    test: (body) => countWords(body) >= MIN_DESCRIPTION_WORDS
+  },
+  {
+    id: "has-issue-reference",
+    label: "Release notes link to an issue, pull request, or ticket",
+    controlRef: "CTRL-2",
+    test: (body) => ISSUE_REFERENCE.test(body),
+    extract: (body) => {
+      ISSUE_REFERENCE_G.lastIndex = 0;
+      const found = [];
+      let m;
+      while ((m = ISSUE_REFERENCE_G.exec(body)) !== null) {
+        const ref = m[0].trim();
+        if (ref)
+          found.push(ref);
+      }
+      return [...new Set(found)];
     }
-    const previousTag = tags[currentIndex + 1];
-    if (!previousTag) {
-      logger.warning(`No previous tag found for ${currentTag}; skipping commit enrichment.`);
-      return;
+  },
+  {
+    id: "not-placeholder",
+    label: "Release notes are not an empty or auto-generated placeholder",
+    controlRef: "CTRL-3",
+    test: (body) => {
+      const normalized = body.trim().toLowerCase();
+      if (normalized.length === 0)
+        return false;
+      const placeholders = ["no changes", "tbd", "todo", "n/a", "wip"];
+      return !placeholders.includes(normalized);
     }
-    const compareResponse = await octokit.rest.repos.compareCommitsWithBasehead({
-      owner: repo.owner,
-      repo: repo.repo,
-      basehead: `${previousTag}...${currentTag}`
-    });
-    const commits = compareResponse.data.commits;
-    const authorsSet = new Set;
-    for (const commit of commits) {
-      const author = commit.author?.login ?? commit.commit.author?.name ?? "unknown";
-      authorsSet.add(author);
+  },
+  {
+    id: "has-changelog-section",
+    label: "Release notes include a changelog or 'What's Changed' section heading",
+    controlRef: "CTRL-4",
+    test: (body) => CHANGELOG_HEADER.test(body),
+    extract: (body) => {
+      const m = CHANGELOG_HEADER.exec(body);
+      return m ? [m[0].trim()] : [];
     }
-    logger.info(`Commit enrichment: ${commits.length} commits by [${[...authorsSet].join(", ")}] between ${previousTag} and ${currentTag}.`);
-    return {
-      count: commits.length,
-      authors: [...authorsSet],
-      shas: commits.map((c) => c.sha)
-    };
-  } catch (err) {
-    logger.warning(`Failed to fetch commit metadata: ${err.message}; skipping commit enrichment.`);
-    return;
+  },
+  {
+    id: "meets-min-length",
+    label: `Release notes are at least ${MIN_BODY_CHARS} characters`,
+    controlRef: "CTRL-5",
+    test: (body) => body.trim().length >= MIN_BODY_CHARS
+  }
+];
+var ISO27001_RULES = [
+  ...DEFAULT_RULES,
+  {
+    id: "has-security-note",
+    label: "Release notes acknowledge security review or confirm no security impact",
+    controlRef: "A.12.1.2",
+    test: (body) => SECURITY_NOTE.test(body)
+  }
+];
+var SOC2_RULES = [
+  ...DEFAULT_RULES,
+  {
+    id: "has-testing-evidence",
+    label: "Release notes include evidence of testing or QA sign-off",
+    controlRef: "CC8.1",
+    test: (body) => TESTING_EVIDENCE.test(body)
+  }
+];
+var DORA_RULES = [
+  ...DEFAULT_RULES,
+  {
+    id: "has-risk-impact",
+    label: "Release notes include a risk or impact assessment (DORA operational resilience)",
+    controlRef: "Art.9",
+    test: (body) => RISK_IMPACT.test(body)
+  }
+];
+function getRulesForProfile(profile) {
+  switch (profile) {
+    case "iso27001":
+      return ISO27001_RULES;
+    case "soc2":
+      return SOC2_RULES;
+    case "dora":
+      return DORA_RULES;
+    case "default":
+      return DEFAULT_RULES;
+    default: {
+      const _exhaustive = profile;
+      throw new Error(`Unknown compliance profile: "${_exhaustive}"`);
+    }
   }
 }
-async function reportFreeTier(release, evaluation, profile) {
+function countWords(text) {
+  if (!text)
+    return 0;
+  return text.trim().split(/\s+/).filter(Boolean).length;
+}
+function evaluateChecklist(body = "", ctx = {}, rules = DEFAULT_RULES) {
+  const safeBody = typeof body === "string" ? body : "";
+  const results = rules.map((rule) => {
+    const ok = Boolean(rule.test(safeBody, ctx));
+    const result = { id: rule.id, label: rule.label, ok };
+    if (rule.controlRef)
+      result.controlRef = rule.controlRef;
+    if (rule.extract) {
+      const evidence = rule.extract(safeBody);
+      if (evidence.length > 0)
+        result.evidence = evidence;
+    }
+    return result;
+  });
+  const score = results.filter((r) => r.ok).length;
+  return {
+    passed: score === results.length,
+    score,
+    total: results.length,
+    results
+  };
+}
+
+// src/custom-rules.ts
+import { readFileSync } from "node:fs";
+function loadCustomRules(filePath) {
+  let raw;
+  try {
+    raw = readFileSync(filePath, "utf8");
+  } catch (err) {
+    throw new Error(`custom-rules-path: cannot read file "${filePath}": ${err.message}`);
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    throw new Error(`custom-rules-path: "${filePath}" is not valid JSON: ${err.message}`);
+  }
+  if (!Array.isArray(parsed)) {
+    throw new Error(`custom-rules-path: "${filePath}" must contain a JSON array of rule objects.`);
+  }
+  return parsed.map((item, index) => {
+    if (typeof item !== "object" || item === null) {
+      throw new Error(`custom-rules-path: rule at index ${index} must be an object.`);
+    }
+    const rule = item;
+    if (typeof rule.id !== "string" || rule.id.trim() === "") {
+      throw new Error(`custom-rules-path: rule at index ${index} is missing a required string "id" field.`);
+    }
+    if (typeof rule.label !== "string" || rule.label.trim() === "") {
+      throw new Error(`custom-rules-path: rule at index ${index} is missing a required string "label" field.`);
+    }
+    if (typeof rule.pattern !== "string" || rule.pattern.trim() === "") {
+      throw new Error(`custom-rules-path: rule at index ${index} is missing a required string "pattern" field.`);
+    }
+    let regex;
+    try {
+      regex = new RegExp(rule.pattern, "i");
+    } catch (err) {
+      throw new Error(`custom-rules-path: rule "${rule.id}" has an invalid regex pattern "${rule.pattern}": ${err.message}`);
+    }
+    const checkRule = {
+      id: rule.id,
+      label: rule.label,
+      test: (body) => regex.test(body)
+    };
+    if (typeof rule.controlRef === "string" && rule.controlRef.trim() !== "") {
+      checkRule.controlRef = rule.controlRef;
+    }
+    return checkRule;
+  });
+}
+
+// src/report.ts
+import { createHash } from "node:crypto";
+var REPORT_SCHEMA_VERSION = "1.0";
+var TOOL_NAME = "automated-release-compliance-action";
+var TOOL_VERSION = "0.1.0";
+function buildComplianceReport(params) {
+  const { release, repo, evaluation, tier, profile, generatedAt, commits, customRulesPath } = params;
+  const report = {
+    schemaVersion: REPORT_SCHEMA_VERSION,
+    generatedAt,
+    tool: { name: TOOL_NAME, version: TOOL_VERSION },
+    tier,
+    profile,
+    repository: `${repo.owner}/${repo.repo}`,
+    release: {
+      tag: release.tag,
+      name: release.name,
+      isPrerelease: release.isPrerelease,
+      isDraft: release.isDraft,
+      publishedAt: release.publishedAt,
+      author: release.author,
+      url: release.url
+    },
+    compliance: {
+      passed: evaluation.passed,
+      score: evaluation.score,
+      total: evaluation.total,
+      checks: evaluation.results.map((r) => ({
+        ...r,
+        ...r.evidence ? { evidence: [...r.evidence] } : {}
+      }))
+    }
+  };
+  if (commits) {
+    report.commits = {
+      count: commits.count,
+      authors: [...commits.authors],
+      shas: [...commits.shas]
+    };
+  }
+  if (customRulesPath) {
+    report.customRulesPath = customRulesPath;
+  }
+  return report;
+}
+function canonicalize(value) {
+  if (value === null || typeof value !== "object")
+    return value;
+  if (Array.isArray(value))
+    return value.map(canonicalize);
+  const obj = value;
+  const sorted = {};
+  for (const key of Object.keys(obj).sort()) {
+    sorted[key] = canonicalize(obj[key]);
+  }
+  return sorted;
+}
+function computeReportHash(report) {
+  const { integrityHash: _omit, ...rest } = report;
+  return createHash("sha256").update(JSON.stringify(canonicalize(rest))).digest("hex");
+}
+function serializeReport(report) {
+  return `${JSON.stringify(report, null, 2)}
+`;
+}
+
+// src/summary.ts
+async function buildJobSummary(params, builder) {
+  const { repo, release, evaluation, profile, tier, generatedAt, reportPath, integrityHash } = params;
+  const repoFullName = `${repo.owner}/${repo.repo}`;
+  const overallIcon = evaluation.passed ? "✅" : "❌";
+  builder.addHeading("Release Compliance Report", 2).addTable([
+    [
+      { data: "Field", header: true },
+      { data: "Value", header: true }
+    ],
+    ["Repository", repoFullName],
+    ["Release Tag", `\`${release.tag}\``],
+    ["Release Name", release.name],
+    ["Compliance Profile", `\`${profile}\``],
+    ["Generated At", generatedAt]
+  ]).addHeading("Checklist Results", 3).addTable([
+    [
+      { data: "Status", header: true },
+      { data: "Check", header: true },
+      { data: "Notes", header: true }
+    ],
+    ...evaluation.results.map((item) => [
+      item.ok ? "✅" : "❌",
+      item.label,
+      item.evidence?.join(", ") ?? ""
+    ])
+  ]).addRaw(`
+**Overall:** ${overallIcon} ${evaluation.score}/${evaluation.total} checks passed` + ` — Tier: \`${tier}\`
+`);
+  if (reportPath) {
+    builder.addRaw(`
+**Artifact:** \`${reportPath}\`
+`);
+  }
+  if (integrityHash) {
+    builder.addRaw(`
+**Integrity:** sha256:${integrityHash}
+`);
+  }
+  await builder.write();
+}
+
+// src/messages.ts
+function buildFailureMessage(profile, evaluation) {
+  const failing = evaluation.results.filter((r) => !r.ok);
+  const lines = [
+    `Release compliance checklist incomplete (${profile}, ${evaluation.score}/${evaluation.total} passed). Failing checks:`,
+    ...failing.map((r) => {
+      const ref = r.controlRef ? `[${r.controlRef}] ` : "";
+      return `  - ${ref}${r.label}`;
+    })
+  ];
+  return lines.join(`
+`);
+}
+
+// src/index.ts
+async function reportFreeTier(repo, release, evaluation, profile, generatedAt, reportPath, integrityHash) {
   core.info("─".repeat(60));
   core.info(`Release compliance check — ${release.name} (${release.tag})`);
   core.info(`Profile: ${profile} | Result: ${evaluation.score}/${evaluation.total} checks passed`);
@@ -22978,30 +23113,24 @@ async function reportFreeTier(release, evaluation, profile) {
   }
   core.info("─".repeat(60));
   try {
-    await core.summary.addHeading("Release Compliance Report", 2).addRaw(`**Release:** \`${release.tag}\` — ${release.name}
-
-`).addRaw(`**Profile:** \`${profile}\` | **Result:** ${evaluation.score}/${evaluation.total} checks passed (tier: free)
-`).addTable([
-      [
-        { data: "Status", header: true },
-        { data: "Check", header: true }
-      ],
-      ...evaluation.results.map((item) => [item.ok ? "✅" : "❌", item.label])
-    ]).write();
+    await buildJobSummary({ repo, release, evaluation, profile, tier: "free", generatedAt, reportPath, integrityHash }, core.summary);
   } catch (err) {
     core.debug(`Could not write job summary: ${err.message}`);
   }
 }
 var VALID_PROFILES = ["default", "iso27001", "soc2", "dora"];
-function writeComplianceReport(reportPath, release, repo, evaluation, tier, commits) {
+function writeComplianceReport(reportPath, release, repo, evaluation, generatedAt, commits, profile = "default", customRulesPath) {
   const report = buildComplianceReport({
     release,
     repo,
     evaluation,
-    tier,
-    generatedAt: new Date().toISOString(),
-    commits
+    tier: "free",
+    profile,
+    generatedAt,
+    commits,
+    customRulesPath
   });
+  report.integrityHash = computeReportHash(report);
   const dir = dirname(reportPath);
   if (dir && dir !== ".") {
     mkdirSync(dir, { recursive: true });
@@ -23009,13 +23138,17 @@ function writeComplianceReport(reportPath, release, repo, evaluation, tier, comm
   writeFileSync(reportPath, serializeReport(report), "utf8");
   core.info(`Wrote compliance report to ${reportPath}`);
   core.setOutput("report-path", reportPath);
+  return report.integrityHash;
 }
 async function run() {
   try {
     const token = core.getInput("github-token", { required: true });
-    const licenseKey = core.getInput("license-key");
     const failOnIncomplete = core.getBooleanInput("fail-on-incomplete");
     const rawProfile = core.getInput("compliance-profile").trim().toLowerCase();
+    if (rawProfile && !VALID_PROFILES.includes(rawProfile)) {
+      core.setFailed(`Unknown compliance-profile "${rawProfile}". Valid values: ${VALID_PROFILES.join(", ")}.`);
+      return;
+    }
     const profile = VALID_PROFILES.includes(rawProfile) ? rawProfile : "default";
     const reportPath = core.getInput("report-path");
     const context2 = github.context;
@@ -23024,50 +23157,48 @@ async function run() {
       core.warning("No release or tag found in the event payload. This action is intended to run on 'release' (published) or tag 'push' events.");
       core.setOutput("passed", "false");
       core.setOutput("score", "0");
-      core.setOutput("tier", licenseKey ? "premium" : "free");
+      core.setOutput("tier", "free");
       core.setOutput("profile", profile);
       return;
     }
-    const rules = getRulesForProfile(profile);
+    const repo = context2.repo ?? { owner: "", repo: "" };
+    const customRulesPath = core.getInput("custom-rules-path").trim();
+    const profileRules = getRulesForProfile(profile);
+    let rules = profileRules;
+    if (customRulesPath) {
+      const customRules = loadCustomRules(customRulesPath);
+      core.info(`Loaded ${customRules.length} custom rule(s) from ${customRulesPath}`);
+      rules = [...profileRules, ...customRules];
+    }
     const evaluation = evaluateChecklist(body, { release }, rules);
-    await reportFreeTier(release, evaluation, profile);
+    const generatedAt = new Date().toISOString();
+    let commits;
+    if (context2.payload.release) {
+      const octokit = github.getOctokit(token);
+      const logger = {
+        info: (m) => core.info(m),
+        warning: (m) => core.warning(m),
+        debug: (m) => core.debug(m)
+      };
+      commits = await fetchReleaseCommits(octokit, repo, release.tag, logger);
+      if (commits) {
+        core.info(`Commit metadata: ${commits.count} commit(s) by ${commits.authors.join(", ")}`);
+      }
+    }
+    let integrityHash;
+    if (reportPath) {
+      integrityHash = writeComplianceReport(reportPath, release, repo, evaluation, generatedAt, commits, profile, customRulesPath || undefined);
+      core.setOutput("integrity-hash", integrityHash);
+    }
+    await reportFreeTier(repo, release, evaluation, profile, generatedAt, reportPath || undefined, integrityHash);
     core.setOutput("passed", String(evaluation.passed));
     core.setOutput("score", `${evaluation.score}/${evaluation.total}`);
     core.setOutput("profile", profile);
-    const tier = licenseKey ? "premium" : "free";
-    core.setOutput("tier", tier);
-    if (reportPath) {
-      const repo = context2.repo ?? { owner: "", repo: "" };
-      let commits;
-      if (context2.payload?.release) {
-        const octokit = github.getOctokit(token);
-        const logger = {
-          info: (m) => core.info(m),
-          warning: (m) => core.warning(m),
-          debug: (m) => core.debug(m)
-        };
-        commits = await fetchReleaseCommits(octokit, repo, release.tag, logger);
-      } else {
-        core.debug("Not a release event; skipping commit enrichment.");
-      }
-      writeComplianceReport(reportPath, release, repo, evaluation, tier, commits);
-    }
-    if (licenseKey) {
-      await runPremiumAudit({
-        licenseKey,
-        release,
-        repo: context2.repo ?? { owner: "", repo: "" },
-        logger: {
-          info: (m) => core.info(m),
-          warning: (m) => core.warning(m),
-          debug: (m) => core.debug(m)
-        }
-      });
-    } else {
-      core.info("No license key provided — running free tier only. Add a 'license-key' input to enable premium AI compliance auditing.");
-    }
-    if (!evaluation.passed && failOnIncomplete) {
-      core.setFailed(`Release compliance checklist incomplete: ${evaluation.score}/${evaluation.total} passed.`);
+    core.setOutput("tier", "free");
+    if (evaluation.passed) {
+      core.info(`✅ All ${evaluation.score}/${evaluation.total} compliance checks passed (profile: ${profile})`);
+    } else if (failOnIncomplete) {
+      core.setFailed(buildFailureMessage(profile, evaluation));
     }
   } catch (error) {
     core.setFailed(`Release compliance action failed: ${error.message}`);
@@ -23079,5 +23210,5 @@ if (__require.main == __require.module) {
 export {
   run,
   parseReleaseFromContext,
-  fetchReleaseCommits
+  buildFailureMessage
 };

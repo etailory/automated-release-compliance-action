@@ -1,9 +1,0 @@
-{
-  "name": "governor-os-compliance-action",
-  "version": "1.0.0",
-  "description": "Governor OS GitHub Action — automated release compliance verification for regulated industries",
-  "engines": {
-    "node": ">=20"
-  },
-  "license": "MIT"
-}

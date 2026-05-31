@@ -3,3 +3,7 @@ node_modules/
 .DS_Store
 coverage/
 # dist/ is intentionally committed so the action runs without a build step.
+
+# TLS certificates — generated locally by scripts/gen-selfsigned-cert.sh or
+# replaced with CA-signed certs. Never commit private key material.
+nginx/certs/*.pem

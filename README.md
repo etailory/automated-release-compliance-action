@@ -58,6 +58,52 @@ jobs:
           path: compliance-report.json
 ```
 
+### Full example with integrity verification
+
+The action emits an `integrity-hash` output — a SHA-256 digest of the report file
+written at action time. A second workflow job can re-download the artifact and
+re-hash it to prove the artifact has not been tampered with between upload and audit.
+
+A complete, copy-pasteable example is in
+[`.github/examples/release-compliance.yml`](.github/examples/release-compliance.yml).
+The key pattern is a two-job workflow:
+
+```yaml
+jobs:
+  check:
+    outputs:
+      integrity-hash: ${{ steps.compliance.outputs.integrity-hash }}
+    steps:
+      - id: compliance
+        uses: markgrendev/automated-release-compliance-action@dev
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          compliance-profile: iso27001
+          report-path: compliance-report.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-compliance-report
+          path: compliance-report.json
+          retention-days: 90
+
+  verify:
+    needs: check
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-compliance-report
+      - name: Verify SHA-256 integrity hash
+        env:
+          EXPECTED_HASH: ${{ needs.check.outputs.integrity-hash }}
+        run: |
+          ACTUAL_HASH=$(sha256sum compliance-report.json | awk '{ print $1 }')
+          if [ "$ACTUAL_HASH" != "$EXPECTED_HASH" ]; then
+            echo "INTEGRITY CHECK FAILED: compliance report has been tampered with."
+            exit 1
+          fi
+          echo "Integrity check passed."
+```
+
 ### Audit evidence (`report-path`)
 
 Set the optional `report-path` input to have the action write a schema-versioned,
@@ -73,19 +119,241 @@ a release was checked against the checklist at publish time.
   "tier": "free",
   "repository": "acme/widgets",
   "release": { "tag": "v1.2.0", "name": "Spring Release", "isPrerelease": false, "isDraft": false, "publishedAt": "2026-05-30T00:00:00Z", "author": "octocat", "url": "https://github.com/acme/widgets/releases/tag/v1.2.0" },
-  "compliance": { "passed": true, "score": 3, "total": 3, "checks": [ /* … */ ] }
+  "compliance": { "passed": true, "score": 5, "total": 5, "checks": [
+    { "id": "has-description", "label": "Release notes contain a description of the changes", "ok": true, "controlRef": "CTRL-1" },
+    { "id": "has-issue-reference", "label": "Release notes link to an issue, pull request, or ticket", "ok": true, "controlRef": "CTRL-2", "evidence": ["#42"] },
+    { "id": "not-placeholder", "label": "Release notes are not an empty or auto-generated placeholder", "ok": true, "controlRef": "CTRL-3" },
+    { "id": "has-changelog-section", "label": "Release notes include a changelog or 'What's Changed' section heading", "ok": true, "controlRef": "CTRL-4", "evidence": ["## What's Changed"] },
+    { "id": "meets-min-length", "label": "Release notes are at least 80 characters", "ok": true, "controlRef": "CTRL-5" }
+  ] },
+  "commits": { "count": 12, "authors": ["octocat", "codercat"], "firstSha": "abc1234", "lastSha": "def5678" },
+  "integrityHash": "a3f1e2b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2"
 }
 ```
 
 | Input | Required | Description |
 | --- | --- | --- |
 | `github-token` | yes | Token used to read release/repository context. |
-| `compliance-profile` | no | Compliance framework: `iso27001`, `soc2`, `dora`, or `general` (default). |
+| `compliance-profile` | no | Compliance framework: `default`, `iso27001`, `soc2`, or `dora`. Defaults to `default`. An unrecognised value fails the workflow. |
 | `report-path` | no | Path to write the JSON compliance report. Omit to skip. |
 | `fail-on-incomplete` | no | Fail the job if the checklist does not pass (default `false`). |
-| `license-key` | no | Enables the (stubbed) premium audit bridge. |
+| `license-key` | no | Enables the premium audit bridge (requires `COMPLIANCE_BACKEND_URL`). |
 
-Outputs: `passed`, `score`, `tier`, and `report-path` (set when a report was written).
+| Output | Description |
+| --- | --- |
+| `passed` | `'true'` if the release satisfied the basic compliance checklist, otherwise `'false'`. |
+| `score` | Number of checklist items passed out of the total (e.g. `3/3`). |
+| `tier` | Which tier ran: `'free'` or `'premium'`. |
+| `profile` | Compliance profile that was evaluated: `'iso27001'`, `'soc2'`, `'dora'`, or `'default'`. |
+| `report-path` | Path of the written JSON compliance report, if `report-path` input was provided. |
+| `integrity-hash` | SHA-256 hex digest of the compliance report artifact. Only set when `report-path` is provided. |
+| `audit-verdict` | **Premium only.** Governance verdict from the backend: `'approved'`, `'conditional'`, or `'blocked'`. |
+
+## Deploy the backend
+
+The premium tier requires a running instance of the Governor OS web server. Use
+Docker or Compose to self-host it alongside your GitHub Actions workflow.
+
+### Quick-start (Docker Compose)
+
+Three commands from the repo root:
+
+```bash
+cp .env.example .env                   # fill in SESSION_SECRET, ADMIN_SECRET, LICENSE_SECRET
+bash scripts/gen-selfsigned-cert.sh    # generate TLS cert (dev/internal); replace with CA-signed cert for production
+docker compose up -d
+# Verify: curl -k https://localhost/health
+# → {"status":"ok","service":"governor-os-web","version":"1.0.0"}
+# OpenAPI spec: curl -k https://localhost/openapi.yaml
+# API docs: https://localhost/docs
+```
+
+The `docker-compose.yml` at the repo root builds the `web/` image, starts an
+nginx TLS reverse proxy, mounts a named Docker volume (`governor_os_data`) so
+the org registry and audit log survive container restarts and replacements, and
+documents every environment variable as commented stubs.
+
+#### TLS certificate setup
+
+| Use case | Steps |
+|---|---|
+| **Development / internal** | `bash scripts/gen-selfsigned-cert.sh` — generates a 4096-bit RSA self-signed cert valid for 825 days |
+| **Production (CA-signed)** | Place your certificate chain at `nginx/certs/fullchain.pem` and private key at `nginx/certs/privkey.pem` before starting the stack |
+| **Let's Encrypt** | Provision with `certbot` and copy/symlink the files to `nginx/certs/` |
+
+The nginx service enforces TLSv1.2+ with HSTS, redirects HTTP → HTTPS, and
+only forwards traffic to the `web` container on the internal Docker network
+(port 3000 is not exposed to the host).
+
+### Build the image manually
+
+```bash
+cd web
+docker build -t governor-os-web .
+docker run --rm -p 3000:3000 governor-os-web
+```
+
+The server starts on `http://localhost:3000`.
+
+### Verify your deployment
+
+After bringing the container up, run the smoke-test script to confirm the
+server is healthy, TLS is terminating, security headers are present, and the
+admin API is correctly wired:
+
+```bash
+# Default: targets https://localhost (the nginx proxy) — no arguments needed
+bash scripts/smoke-test.sh
+
+# With admin org lifecycle checks:
+ADMIN_SECRET=your-secret bash scripts/smoke-test.sh
+
+# Against a remote deployment:
+BASE_URL=https://compliance.your-company.com ADMIN_SECRET=your-secret bash scripts/smoke-test.sh
+
+# Against the web container directly (plain HTTP, skips header checks):
+BASE_URL=http://localhost:3000 ADMIN_SECRET=your-secret bash scripts/smoke-test.sh
+```
+
+The script checks `/health`, verifies `Strict-Transport-Security` and
+`X-Content-Type-Options` headers (when targeting HTTPS), creates a temporary
+test org via `POST /admin/orgs`, confirms it appears in `GET /admin/orgs`, and
+removes it with `DELETE /admin/orgs/:id`. It prints a pass/fail summary and
+exits 0 only when all checks succeed.
+
+Set `COMPLIANCE_BACKEND_URL` in your GitHub Actions workflow to point to the
+public URL where you've deployed this container:
+
+```yaml
+- uses: markgrendev/automated-release-compliance-action@dev
+  with:
+    github-token: ${{ secrets.GITHUB_TOKEN }}
+    license-key: ${{ secrets.GOVERNOR_LICENSE_KEY }}
+  env:
+    # URL of your self-hosted Governor OS backend:
+    COMPLIANCE_BACKEND_URL: ${{ secrets.COMPLIANCE_BACKEND_URL }}
+```
+
+### Environment variables
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `PORT` | `3000` | HTTP port the server binds to |
+| `SESSION_SECRET` | — | HMAC secret for signing session tokens. Required in production. Generate: `openssl rand -hex 32`. |
+| `ADMIN_SECRET` | — | Protects the `/admin/orgs` endpoints. When unset all admin endpoints return 503. Generate: `openssl rand -hex 32`. |
+| `LICENSE_SECRET` | — | The license key the server accepts from the action (`Authorization: Bearer <key>`). When unset, any non-empty key is accepted (dev mode only). |
+| `ORGS_FILE` | `data/orgs.json` | Path inside the container to the org registry JSON file. |
+| `AUDIT_LOG_FILE` | `data/audit-log.ndjson` | Path inside the container to the durable audit log. |
+| `ORGS_CONFIG` | — | JSON array to seed the org registry on startup (e.g. `[{"id":"acme","licenseKey":"lk-secret","allowedSubs":["repo:acme/*"]}]`). Useful for bootstrapping without the admin API. |
+| `DATABASE_URL` | — | PostgreSQL connection string (future) |
+| `GITHUB_OIDC_JWKS_URL` | GitHub default | Override for GitHub Enterprise |
+
+Copy `.env.example` to `.env` and fill in secrets. Never commit `.env`.
+
+---
+
+## Premium tier
+
+Once the backend is deployed, add `license-key` and `COMPLIANCE_BACKEND_URL` to
+your workflow to enable the premium audit bridge. The action will submit release
+metadata to the backend, poll until the audit job completes, and expose the
+governance verdict as the `audit-verdict` output.
+
+### Full workflow example
+
+```yaml
+name: Release Compliance (Premium)
+on:
+  release:
+    types: [published]
+
+jobs:
+  compliance:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run Governor OS compliance audit
+        id: compliance
+        uses: markgrendev/automated-release-compliance-action@dev
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          compliance-profile: iso27001
+          license-key: ${{ secrets.GOVERNOR_LICENSE_KEY }}
+          report-path: compliance-report.json
+          fail-on-incomplete: "true"
+        env:
+          COMPLIANCE_BACKEND_URL: ${{ secrets.COMPLIANCE_BACKEND_URL }}
+
+      - name: Enforce governance verdict
+        if: steps.compliance.outputs.audit-verdict == 'blocked'
+        run: |
+          echo "Deployment blocked by Governor OS governance audit."
+          exit 1
+
+      - name: Log audit result
+        run: |
+          echo "Tier: ${{ steps.compliance.outputs.tier }}"
+          echo "Profile: ${{ steps.compliance.outputs.profile }}"
+          echo "Passed: ${{ steps.compliance.outputs.passed }}"
+          echo "Score: ${{ steps.compliance.outputs.score }}"
+          echo "Verdict: ${{ steps.compliance.outputs.audit-verdict }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-compliance-report
+          path: compliance-report.json
+```
+
+Set `COMPLIANCE_BACKEND_URL` as a repository secret pointing to your deployed
+backend (e.g. `https://compliance.your-company.com`). The action reads this
+environment variable automatically — no additional `backend-url` input is
+required.
+
+### Governance verdicts
+
+| Verdict | Meaning |
+| --- | --- |
+| `approved` | Release is a fully-published, non-draft production release. All governance controls are satisfied. Safe to deploy. |
+| `conditional` | Release is a pre-release. Reduced controls apply. Manual review recommended before promoting to production. |
+| `blocked` | Release is a draft. The audit cannot be approved until the release is published. Block deployment. |
+
+The `audit-verdict` output is only set when the premium tier runs (i.e., when
+`license-key` is provided and `COMPLIANCE_BACKEND_URL` is reachable). On the
+free tier the output is an empty string.
+
+### Audit result structure
+
+The backend returns a JSON job result that is summarised in the action workflow
+run. The key fields are:
+
+```jsonc
+{
+  "auditTrailId": "audit-acme_widgets-v1.2.0-1748692800000",
+  "repository":   "acme/widgets",
+  "profile":      "iso27001",                         // "default" | "iso27001" | "soc2" | "dora"
+  "release": {
+    "tag":         "v1.2.0",
+    "publishedAt": "2026-05-31T12:00:00.000Z",
+    "author":      "octocat"
+  },
+  "governanceVerdict": {
+    "verdict": "approved",                            // "approved" | "conditional" | "blocked"
+    "reason":  "Release meets Governor OS governance requirements."
+  },
+  "controlMapping": {
+    // Keys use the profile-appropriate control scheme:
+    //   iso27001 → ISO 27001 Annex A (A.12.1.2, A.14.2.2, ...)
+    //   soc2     → SOC2 Trust Services Criteria (CC6.1, CC7.2, ...)
+    //   dora     → DORA Articles (Art.9, Art.10, ...)
+    //   default  → Generic codes (CTRL-1, CTRL-2, ...)
+    "A.12.1.2": "Change management: Release tag and metadata captured and reviewed.",
+    "A.14.2.2": "System change control: CI workflow completion linked to release.",
+    "A.14.2.8": "System security testing: Release notes and issue references reviewed."
+  },
+  "completedAt": "2026-05-31T12:00:01.234Z"
+}
+```
+
+---
 
 ## Development
 

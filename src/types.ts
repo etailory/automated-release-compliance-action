@@ -2,12 +2,20 @@ export interface CheckRule {
   id: string;
   label: string;
   test: (body: string, ctx?: Record<string, unknown>) => boolean;
+  /** Optional: extract the specific text/references that satisfied this check. */
+  extract?: (body: string) => string[];
+  /** Regulatory control reference (e.g. "CTRL-1", "A.12.1.2", "CC8.1", "Art.9"). */
+  controlRef?: string;
 }
 
 export interface CheckResult {
   id: string;
   label: string;
   ok: boolean;
+  /** Specific text or references found by this check (populated when available). */
+  evidence?: string[];
+  /** Regulatory control reference traceable to a specific framework control. */
+  controlRef?: string;
 }
 
 export interface EvaluateResult {
@@ -39,35 +47,6 @@ export interface Logger {
   debug: (message: string) => void;
 }
 
-export interface AuditPayload {
-  schemaVersion: string;
-  repository: string;
-  release: {
-    tag: string;
-    name: string;
-    isPrerelease: boolean;
-    isDraft: boolean;
-    publishedAt: string | null;
-    author: string | null;
-  };
-  requested: {
-    isoControlMapping: boolean;
-    evidencePdf: boolean;
-    governanceVerdict: boolean;
-  };
-}
-
-export interface DispatchResult {
-  status: string;
-  queued: boolean;
-}
-
-export interface PremiumAuditResult {
-  prepared: boolean;
-  endpoint: string;
-  payload: AuditPayload;
-}
-
 export interface ActionContext {
   payload: Record<string, unknown>;
   actor?: string;
@@ -77,11 +56,11 @@ export interface ActionContext {
 
 export type ComplianceProfile = "default" | "iso27001" | "soc2" | "dora";
 
-/** Commit metadata enrichment fetched from the GitHub API for a release. */
+/** Commit metadata fetched from the GitHub API for a release. */
 export interface CommitMetadata {
-  /** Total number of commits included in the release. */
+  /** Number of commits in this release. */
   count: number;
-  /** Unique committer logins (or names when no login is available). */
+  /** Unique committer logins (or names when login is unavailable). */
   authors: string[];
   /** Full commit SHAs for traceability. */
   shas: string[];
@@ -106,6 +85,8 @@ export interface ComplianceReport {
   };
   /** Which tier produced the evaluation. */
   tier: "free" | "premium";
+  /** Compliance framework the checklist was evaluated against. */
+  profile: ComplianceProfile;
   /** `owner/repo` the release belongs to. */
   repository: string;
   release: {
@@ -123,6 +104,17 @@ export interface ComplianceReport {
     total: number;
     checks: CheckResult[];
   };
-  /** GitHub API-sourced commit metadata. Present only for `release` events when enrichment succeeds. */
+  /** Commit metadata fetched from the GitHub API (populated on release events). */
   commits?: CommitMetadata;
+  /**
+   * Path to the custom rules file that was active during evaluation.
+   * When set, this field makes the audit trail complete: auditors can trace
+   * exactly which org-specific controls contributed to the compliance result.
+   */
+  customRulesPath?: string;
+  /**
+   * SHA-256 hex digest of the canonical JSON of all fields except this one.
+   * Lets auditors verify the artifact has not been modified after generation.
+   */
+  integrityHash?: string;
 }

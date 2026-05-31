@@ -1,0 +1,91 @@
+# Governor OS Web Server — Docker Compose
+#
+# Quick start (from the web/ directory):
+#   cp .env.example .env        # fill in SESSION_SECRET, ADMIN_SECRET, LICENSE_SECRET
+#   docker compose up -d
+#   curl http://localhost:3000/health
+#   # → {"status":"ok","service":"governor-os-web","version":"1.0.0"}
+#
+# From the repo root, use the root docker-compose.yml instead.
+
+services:
+  governor-os-web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      # Host port defaults to 3000. Set PORT in .env to use a different port on
+      # the host — the server inside the container will also use that port.
+      - "${PORT:-3000}:${PORT:-3000}"
+    environment:
+      - NODE_ENV=production
+
+      # ── Server ───────────────────────────────────────────────────────────────
+      # PORT — HTTP port the server binds to inside the container.
+      # Default: 3000
+      - PORT=${PORT:-3000}
+
+      # ── Auth & License ───────────────────────────────────────────────────────
+      # SESSION_SECRET — HMAC secret for signing session tokens and audit record
+      # integrity signatures. Required in production.
+      # Generate: openssl rand -hex 32
+      - SESSION_SECRET=${SESSION_SECRET:-}
+
+      # ADMIN_SECRET — protects the /admin/orgs endpoints (GET, POST, DELETE).
+      # When unset, all admin endpoints return 503 Service Unavailable.
+      # Generate: openssl rand -hex 32
+      - ADMIN_SECRET=${ADMIN_SECRET:-}
+
+      # LICENSE_SECRET — license key the server accepts from GitHub Actions.
+      # When unset, any non-empty key is accepted (development mode only).
+      # Generate: openssl rand -hex 32
+      - LICENSE_SECRET=${LICENSE_SECRET:-}
+
+      # ── File Persistence ──────────────────────────────────────────────────────
+      # ORGS_FILE — path inside the container to the org registry JSON file.
+      # Default: data/orgs.json (persisted via the audit-data volume below).
+      - ORGS_FILE=${ORGS_FILE:-data/orgs.json}
+
+      # AUDIT_LOG_FILE — path inside the container to the durable audit log.
+      # Default: data/audit-log.ndjson (persisted via the audit-data volume below).
+      - AUDIT_LOG_FILE=${AUDIT_LOG_FILE:-data/audit-log.ndjson}
+
+      # ORGS_CONFIG — JSON array to seed the org registry on startup without
+      # calling the admin API. Useful for bootstrapping single-tenant deployments.
+      # Example: [{"id":"acme","licenseKey":"lk-secret","allowedSubs":["repo:acme/*"]}]
+      - ORGS_CONFIG=${ORGS_CONFIG:-}
+
+      # ── OIDC / GitHub Integration ─────────────────────────────────────────────
+      # JWKS_URL — GitHub OIDC JWKS endpoint.
+      # Only override for GitHub Enterprise Server installations.
+      # Default: https://token.actions.githubusercontent.com/.well-known/jwks
+      - JWKS_URL=${JWKS_URL:-}
+
+      # OIDC_ISSUER — expected issuer claim in incoming OIDC tokens.
+      # Default: https://token.actions.githubusercontent.com
+      - OIDC_ISSUER=${OIDC_ISSUER:-}
+
+      # OIDC_AUDIENCE — expected audience claim in incoming OIDC tokens.
+      # Default: governor-os
+      - OIDC_AUDIENCE=${OIDC_AUDIENCE:-}
+
+    volumes:
+      # Named volume — persists the audit log and org registry across container
+      # restarts and image upgrades.
+      # Inspect:  docker volume inspect governor-os-web_audit-data
+      # Back up:  docker run --rm -v governor-os-web_audit-data:/data busybox \
+      #             tar czf - /data > audit-data.tar.gz
+      - audit-data:/app/data
+
+    restart: unless-stopped
+
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:${PORT:-3000}/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  audit-data:
+    driver: local

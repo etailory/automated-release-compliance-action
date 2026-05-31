@@ -11,8 +11,11 @@
  * Side effects (writing the file) live in the action entry point.
  */
 
+import { createHash } from "node:crypto";
+
 import type {
   CommitMetadata,
+  ComplianceProfile,
   ComplianceReport,
   EvaluateResult,
   Release,
@@ -35,24 +38,27 @@ export const TOOL_VERSION = "0.1.0";
  * @param params.repo         The `owner`/`repo` the release belongs to.
  * @param params.evaluation   Result of {@link evaluateChecklist}.
  * @param params.tier         Which tier produced the evaluation.
- * @param params.generatedAt  ISO-8601 timestamp; injected for determinism.
- * @param params.commits      Optional commit enrichment from the GitHub API.
+ * @param params.generatedAt     ISO-8601 timestamp; injected for determinism.
+ * @param params.customRulesPath Path to the custom rules file, when one was active.
  */
 export function buildComplianceReport(params: {
   release: Release;
   repo: Repo;
   evaluation: EvaluateResult;
   tier: "free" | "premium";
+  profile: ComplianceProfile;
   generatedAt: string;
   commits?: CommitMetadata;
+  customRulesPath?: string;
 }): ComplianceReport {
-  const { release, repo, evaluation, tier, generatedAt, commits } = params;
+  const { release, repo, evaluation, tier, profile, generatedAt, commits, customRulesPath } = params;
 
   const report: ComplianceReport = {
     schemaVersion: REPORT_SCHEMA_VERSION,
     generatedAt,
     tool: { name: TOOL_NAME, version: TOOL_VERSION },
     tier,
+    profile,
     repository: `${repo.owner}/${repo.repo}`,
     release: {
       tag: release.tag,
@@ -67,16 +73,52 @@ export function buildComplianceReport(params: {
       passed: evaluation.passed,
       score: evaluation.score,
       total: evaluation.total,
-      // Copy each check so the report is a standalone snapshot, not a live reference.
-      checks: evaluation.results.map((r) => ({ ...r })),
+      // Deep-copy each check so the report is a standalone snapshot, not a live reference.
+      checks: evaluation.results.map((r) => ({
+        ...r,
+        ...(r.evidence ? { evidence: [...r.evidence] } : {}),
+      })),
     },
   };
 
-  if (commits !== undefined) {
-    report.commits = commits;
+  if (commits) {
+    report.commits = {
+      count: commits.count,
+      authors: [...commits.authors],
+      shas: [...commits.shas],
+    };
+  }
+
+  if (customRulesPath) {
+    report.customRulesPath = customRulesPath;
   }
 
   return report;
+}
+
+/** Recursively sort object keys so JSON serialization is key-order-stable. */
+function canonicalize(value: unknown): unknown {
+  if (value === null || typeof value !== "object") return value;
+  if (Array.isArray(value)) return value.map(canonicalize);
+  const obj = value as Record<string, unknown>;
+  const sorted: Record<string, unknown> = {};
+  for (const key of Object.keys(obj).sort()) {
+    sorted[key] = canonicalize(obj[key]);
+  }
+  return sorted;
+}
+
+/**
+ * Compute a SHA-256 hex digest over the canonical (sorted-key) JSON of all
+ * report fields except `integrityHash` itself, so the hash is stable across
+ * re-serializations and schema-compatible additions.
+ */
+export function computeReportHash(report: ComplianceReport): string {
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const { integrityHash: _omit, ...rest } = report;
+  return createHash("sha256")
+    .update(JSON.stringify(canonicalize(rest)))
+    .digest("hex");
 }
 
 /**

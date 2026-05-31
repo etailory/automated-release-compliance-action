@@ -1,13 +1,13 @@
 {
   "name": "automated-release-compliance-action",
-  "version": "0.1.0",
-  "description": "A lightweight GitHub Action that checks published releases against a basic compliance checklist, with a bridge prepared for premium AI-driven ISO/SOC2/DORA auditing.",
+  "version": "1.0.0",
+  "description": "A GitHub Action that checks published releases against compliance checklists for ISO 27001, SOC 2, and DORA.",
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
     "build": "bun build src/index.ts --outfile dist/index.js --target node",
-    "test": "bun test",
-    "lint": "echo \"(placeholder) add eslint here\" && exit 0"
+    "test": "bun test test/",
+    "lint": "eslint src/ test/"
   },
   "keywords": [
     "github-action",
@@ -25,5 +25,10 @@
   "dependencies": {
     "@actions/core": "^1.11.1",
     "@actions/github": "^6.0.0"
+  },
+  "devDependencies": {
+    "@typescript-eslint/eslint-plugin": "^8.60.0",
+    "@typescript-eslint/parser": "^8.60.0",
+    "eslint": "^10.4.1"
   }
 }

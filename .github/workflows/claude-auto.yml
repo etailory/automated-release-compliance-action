@@ -36,7 +36,6 @@ jobs:
         uses: anthropics/claude-code-action@main
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          allowed_bots: "*"
           # Automation mode: run from a direct prompt (no @claude mention needed).
           prompt: |
             You are running the Governor OS autonomous development loop.
@@ -63,7 +62,7 @@ jobs:
             Never push to `main`. Keep each iteration small and shippable.
           claude_args: |
             --model claude-sonnet-4-6
-            --max-turns 120
+            --max-turns 40
             --allowedTools "Bash,Edit,Write,Read,Glob,Grep"
         env:
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
