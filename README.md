@@ -45,9 +45,11 @@ jobs:
   compliance:
     runs-on: ubuntu-latest
     steps:
-      - uses: markgrendev/automated-release-compliance-action@main
+      - uses: markgrendev/automated-release-compliance-action@dev
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
+          # Compliance profile: 'iso27001', 'soc2', 'dora', or 'default'
+          compliance-profile: iso27001
           # Write durable audit evidence and archive it as a CI artifact:
           report-path: compliance-report.json
           # license-key: ${{ secrets.GOVERNOR_LICENSE_KEY }}
@@ -150,10 +152,9 @@ cd web && npm install      # install web server dependencies
 ## Project layout
 
 ```
-action/             GitHub Action implementation (node20, OIDC-based)
-  action.yml        Action metadata + input/output contract
-  index.js          Entry point: free-tier + premium OIDC compliance
-  package.json      Action dependencies (@actions/core, @actions/github)
+action/             GitHub Action alias — delegates to dist/index.js
+  action.yml        Action metadata + input/output contract (mirrors root action.yml)
+  package.json      Minimal package metadata (no separate deps; uses bundled dist/)
 web/                Express API server for premium audit trail generation
   server.js         REST API: /api/v1/compliance/verify + /audit
   package.json      Web server dependencies (express)

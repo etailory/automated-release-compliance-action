@@ -1,28 +1,47 @@
-name: 'Governor OS Compliance Action'
-description: 'Automated release note compliance verification for regulated industries (ISO 27001, SOC2, DORA). Provides free-tier log verification and premium OIDC-authenticated audit generation via the Governor OS web platform.'
-author: 'Governor OS'
+name: "Automated Release Compliance Governor"
+description: "Scan published GitHub releases against a compliance checklist. Free tier runs locally; premium tier bridges to a hosted AI audit backend."
+author: "markgrendev"
 
 branding:
-  icon: 'shield'
-  color: 'blue'
+  icon: "shield"
+  color: "blue"
 
 inputs:
   github-token:
-    description: 'GitHub token used to read release events and authenticate API calls. Typically secrets.GITHUB_TOKEN.'
+    description: "GitHub token used to read release and repository context (typically secrets.GITHUB_TOKEN)."
     required: true
+    default: ${{ github.token }}
 
-  anthropic-federation-rule-id:
-    description: 'OIDC federation rule ID issued by the Governor OS platform. Enables keyless authentication for premium compliance features without storing long-lived secrets.'
+  license-key:
+    description: "Optional premium license key. When provided, the action prepares the secure bridge to the hosted AI compliance audit backend. When omitted, only the free local checklist runs."
     required: false
+    default: ""
 
-  anthropic-organization-id:
-    description: 'Governor OS organization ID. Used to scope premium compliance checks and audit trails to the correct tenant.'
+  fail-on-incomplete:
+    description: "If 'true', the action fails the workflow when the free-tier checklist does not pass. Defaults to 'false' (warn-only)."
     required: false
+    default: "false"
 
-  anthropic-service-account-id:
-    description: 'Governor OS service account ID. Used alongside the federation rule to authenticate the action as a trusted CI principal during OIDC exchange.'
+  compliance-profile:
+    description: "Compliance profile to evaluate against: 'iso27001', 'soc2', 'dora', or 'default'. Determines which checklist rules are applied."
     required: false
+    default: "default"
+
+  report-path:
+    description: "Optional path to write a machine-readable JSON compliance report (audit evidence). When set, a schema-versioned report is written and can be archived as a CI artifact. When omitted, no file is written."
+    required: false
+    default: ""
+
+outputs:
+  passed:
+    description: "'true' if the release satisfied the basic compliance checklist, otherwise 'false'."
+  score:
+    description: "Number of checklist items passed out of the total."
+  tier:
+    description: "Which tier ran: 'free' or 'premium'."
+  report-path:
+    description: "Path of the written JSON compliance report, if 'report-path' was provided."
 
 runs:
-  using: 'node20'
-  main: 'index.js'
+  using: "node20"
+  main: "../dist/index.js"
