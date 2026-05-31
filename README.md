@@ -101,21 +101,34 @@ Docker or Compose to self-host it alongside your GitHub Actions workflow.
 
 ### Quick-start (Docker Compose)
 
-Two commands from the repo root:
+Three commands from the repo root:
 
 ```bash
-cp .env.example .env          # fill in SESSION_SECRET, ADMIN_SECRET, LICENSE_SECRET
+cp .env.example .env                   # fill in SESSION_SECRET, ADMIN_SECRET, LICENSE_SECRET
+bash scripts/gen-selfsigned-cert.sh    # generate TLS cert (dev/internal); replace with CA-signed cert for production
 docker compose up -d
-# Verify: curl http://localhost:3000/health
+# Verify: curl -k https://localhost/health
 # → {"status":"ok","service":"governor-os-web","version":"1.0.0"}
-# OpenAPI spec: curl http://localhost:3000/openapi.yaml
-# API docs: http://localhost:3000/docs
+# OpenAPI spec: curl -k https://localhost/openapi.yaml
+# API docs: https://localhost/docs
 ```
 
-The `docker-compose.yml` at the repo root builds the `web/` image, mounts a
-named Docker volume (`governor_os_data`) so the org registry and audit log
-survive container restarts and replacements, and documents every environment
-variable as commented stubs.
+The `docker-compose.yml` at the repo root builds the `web/` image, starts an
+nginx TLS reverse proxy, mounts a named Docker volume (`governor_os_data`) so
+the org registry and audit log survive container restarts and replacements, and
+documents every environment variable as commented stubs.
+
+#### TLS certificate setup
+
+| Use case | Steps |
+|---|---|
+| **Development / internal** | `bash scripts/gen-selfsigned-cert.sh` — generates a 4096-bit RSA self-signed cert valid for 825 days |
+| **Production (CA-signed)** | Place your certificate chain at `nginx/certs/fullchain.pem` and private key at `nginx/certs/privkey.pem` before starting the stack |
+| **Let's Encrypt** | Provision with `certbot` and copy/symlink the files to `nginx/certs/` |
+
+The nginx service enforces TLSv1.2+ with HSTS, redirects HTTP → HTTPS, and
+only forwards traffic to the `web` container on the internal Docker network
+(port 3000 is not exposed to the host).
 
 ### Build the image manually
 
