@@ -15,6 +15,7 @@ import {
   app,
   auditJobs,
   evictedJobIds,
+  orgRegistry,
   validateLicenseKey,
   _auditLimiterStore,
   _verifyLimiterStore,
@@ -91,11 +92,15 @@ beforeEach(async () => {
   // Reset job store and eviction tracking between tests for isolation
   auditJobs.clear();
   evictedJobIds.clear();
+  // Clear org registry so each test starts in dev mode (permissive)
+  orgRegistry.clear();
   // Reset rate limiter counters so tests don't bleed into each other
   await _auditLimiterStore.resetAll?.();
   await _verifyLimiterStore.resetAll?.();
-  // Ensure LICENSE_SECRET is unset by default so tests work in dev mode
+  // Ensure sensitive env vars are unset by default
   delete process.env.LICENSE_SECRET;
+  delete process.env.ADMIN_SECRET;
+  delete process.env.ORGS_CONFIG;
   // Set OIDC env vars and reset JWKS cache for every test
   process.env.JWKS_URL      = `http://127.0.0.1:${mockJwksPort}/.well-known/jwks`;
   process.env.OIDC_ISSUER   = 'https://token.actions.githubusercontent.com';
@@ -562,6 +567,252 @@ describe('TTL eviction and 410 Gone', () => {
     assert.ok(auditJobs.has(jobId), 'Live job must remain in the store');
     const { status } = await req('GET', `/api/v1/compliance/audit/${jobId}`);
     assert.equal(status, 200);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Organization registry — verify endpoint
+// ---------------------------------------------------------------------------
+
+describe('POST /api/v1/compliance/verify — org registry', () => {
+  test('returns 403 when organizationId is not in registry', async () => {
+    // Register a different org so the registry is in enforcement mode
+    orgRegistry.set('other-org', { licenseKey: 'lk-other', allowedSubs: ['repo:other/*'] });
+
+    const oidcToken = await mintOidcJwt();
+    const { status, body } = await req('POST', '/api/v1/compliance/verify', {
+      ...VALID_VERIFY_BODY,
+      organizationId: 'unknown-org',
+      oidcToken,
+    });
+    assert.equal(status, 403);
+    assert.equal(body.success, false);
+    assert.match(body.error, /not registered/);
+  });
+
+  test('returns 401 when federationRuleId does not match org allowedSubs', async () => {
+    orgRegistry.set('acme-corp', {
+      licenseKey:  'lk-acme-test',
+      allowedSubs: ['repo:owner/repo*'],
+    });
+
+    const oidcToken = await mintOidcJwt();
+    // federationRuleId belongs to a different owner — not covered by allowedSubs
+    const { status, body } = await req('POST', '/api/v1/compliance/verify', {
+      ...VALID_VERIFY_BODY,
+      organizationId:   'acme-corp',
+      federationRuleId: 'repo:other-owner/repo',
+      oidcToken,
+    });
+    assert.equal(status, 401);
+    assert.equal(body.success, false);
+  });
+
+  test('returns 401 when OIDC sub does not match org allowedSubs', async () => {
+    // Use an exact-match pattern so a sub with extra path segments fails
+    orgRegistry.set('acme-corp', {
+      licenseKey:  'lk-acme-test',
+      allowedSubs: ['repo:owner/repo'],   // exact match — no wildcard
+    });
+
+    // sub has extra path segments → exact match fails
+    const oidcToken = await mintOidcJwt({
+      sub: 'repo:owner/repo:ref:refs/heads/main',
+    });
+    const { status, body } = await req('POST', '/api/v1/compliance/verify', {
+      ...VALID_VERIFY_BODY,
+      organizationId:   'acme-corp',
+      federationRuleId: 'repo:owner/repo',
+      oidcToken,
+    });
+    assert.equal(status, 401);
+    assert.equal(body.success, false);
+  });
+
+  test('returns 200 when org is registered and sub matches allowedSubs', async () => {
+    orgRegistry.set('acme-corp', {
+      licenseKey:  'lk-acme-test',
+      allowedSubs: ['repo:owner/repo*'],
+    });
+
+    const oidcToken = await mintOidcJwt();
+    const { status, body } = await req('POST', '/api/v1/compliance/verify', {
+      ...VALID_VERIFY_BODY,
+      organizationId: 'acme-corp',
+      oidcToken,
+    });
+    assert.equal(status, 200);
+    assert.equal(body.success, true);
+    assert.ok(body.sessionToken);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Organization registry — audit endpoint
+// ---------------------------------------------------------------------------
+
+describe('POST /api/v1/compliance/audit — org registry', () => {
+  test('returns 202 when authenticated via valid session token for registered org', async () => {
+    orgRegistry.set('acme-corp', {
+      licenseKey:  'lk-acme-test',
+      allowedSubs: ['repo:owner/repo*'],
+    });
+
+    // Obtain session token via verify
+    const oidcToken = await mintOidcJwt();
+    const { body: vBody } = await req('POST', '/api/v1/compliance/verify', {
+      ...VALID_VERIFY_BODY,
+      organizationId: 'acme-corp',
+      oidcToken,
+    });
+    assert.equal(vBody.success, true, 'Expected verify to succeed');
+
+    const { status } = await req(
+      'POST', '/api/v1/compliance/audit', VALID_AUDIT_PAYLOAD,
+      { Authorization: `Bearer ${vBody.sessionToken}` }
+    );
+    assert.equal(status, 202);
+  });
+
+  test('returns 403 when org from session token has been evicted from registry', async () => {
+    // Register org, obtain token, then evict org
+    orgRegistry.set('acme-corp', {
+      licenseKey:  'lk-acme-test',
+      allowedSubs: ['repo:owner/repo*'],
+    });
+
+    const oidcToken = await mintOidcJwt();
+    const { body: vBody } = await req('POST', '/api/v1/compliance/verify', {
+      ...VALID_VERIFY_BODY,
+      organizationId: 'acme-corp',
+      oidcToken,
+    });
+    assert.equal(vBody.success, true, 'Expected verify to succeed');
+
+    // Evict acme-corp but keep registry in enforcement mode with another org
+    orgRegistry.delete('acme-corp');
+    orgRegistry.set('other-org', { licenseKey: 'lk-other', allowedSubs: ['repo:other/*'] });
+
+    const { status, body } = await req(
+      'POST', '/api/v1/compliance/audit', VALID_AUDIT_PAYLOAD,
+      { Authorization: `Bearer ${vBody.sessionToken}` }
+    );
+    assert.equal(status, 403);
+    assert.equal(body.success, false);
+  });
+
+  test('returns 202 when license key matches a registered org (multi-tenant mode)', async () => {
+    orgRegistry.set('acme-corp', {
+      licenseKey:  'lk-acme-multitenant',
+      allowedSubs: ['repo:owner/repo*'],
+    });
+
+    const { status } = await req(
+      'POST', '/api/v1/compliance/audit', VALID_AUDIT_PAYLOAD,
+      { Authorization: 'Bearer lk-acme-multitenant' }
+    );
+    assert.equal(status, 202);
+  });
+
+  test('returns 401 when license key does not match any registered org', async () => {
+    orgRegistry.set('acme-corp', {
+      licenseKey:  'lk-correct-key',
+      allowedSubs: ['repo:owner/repo*'],
+    });
+
+    const { status, body } = await req(
+      'POST', '/api/v1/compliance/audit', VALID_AUDIT_PAYLOAD,
+      { Authorization: 'Bearer lk-wrong-key' }
+    );
+    assert.equal(status, 401);
+    assert.equal(body.success, false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// POST /admin/orgs
+// ---------------------------------------------------------------------------
+
+describe('POST /admin/orgs', () => {
+  test('returns 503 when ADMIN_SECRET is not configured', async () => {
+    const { status, body } = await req(
+      'POST', '/admin/orgs',
+      { id: 'test-org', licenseKey: 'lk-test', allowedSubs: ['repo:test/*'] },
+      { Authorization: 'Bearer any-secret' }
+    );
+    assert.equal(status, 503);
+    assert.equal(body.success, false);
+  });
+
+  test('returns 401 when ADMIN_SECRET is set and wrong secret is provided', async () => {
+    process.env.ADMIN_SECRET = 'correct-admin-secret';
+    const { status, body } = await req(
+      'POST', '/admin/orgs',
+      { id: 'test-org', licenseKey: 'lk-test', allowedSubs: ['repo:test/*'] },
+      { Authorization: 'Bearer wrong-secret' }
+    );
+    assert.equal(status, 401);
+    assert.equal(body.success, false);
+  });
+
+  test('returns 401 when Authorization header is absent', async () => {
+    process.env.ADMIN_SECRET = 'correct-admin-secret';
+    const { status, body } = await req(
+      'POST', '/admin/orgs',
+      { id: 'test-org', licenseKey: 'lk-test', allowedSubs: ['repo:test/*'] }
+    );
+    assert.equal(status, 401);
+    assert.equal(body.success, false);
+  });
+
+  test('returns 200 and registers org when correct ADMIN_SECRET is provided', async () => {
+    process.env.ADMIN_SECRET = 'admin-secret-key';
+    const { status, body } = await req(
+      'POST', '/admin/orgs',
+      { id: 'new-org', licenseKey: 'lk-new', allowedSubs: ['repo:new/*'] },
+      { Authorization: 'Bearer admin-secret-key' }
+    );
+    assert.equal(status, 200);
+    assert.equal(body.success, true);
+    assert.ok(orgRegistry.has('new-org'));
+    const entry = orgRegistry.get('new-org');
+    assert.equal(entry.licenseKey, 'lk-new');
+    assert.deepEqual(entry.allowedSubs, ['repo:new/*']);
+  });
+
+  test('returns 200 and updates an existing org', async () => {
+    process.env.ADMIN_SECRET = 'admin-secret-key';
+    orgRegistry.set('existing-org', { licenseKey: 'lk-old', allowedSubs: ['repo:old/*'] });
+
+    await req(
+      'POST', '/admin/orgs',
+      { id: 'existing-org', licenseKey: 'lk-updated', allowedSubs: ['repo:new/*'] },
+      { Authorization: 'Bearer admin-secret-key' }
+    );
+    const entry = orgRegistry.get('existing-org');
+    assert.equal(entry.licenseKey, 'lk-updated');
+  });
+
+  test('returns 400 when required fields are missing', async () => {
+    process.env.ADMIN_SECRET = 'admin-secret';
+    const { status, body } = await req(
+      'POST', '/admin/orgs',
+      { id: 'bad-org' },  // missing licenseKey and allowedSubs
+      { Authorization: 'Bearer admin-secret' }
+    );
+    assert.equal(status, 400);
+    assert.equal(body.success, false);
+  });
+
+  test('returns 400 when allowedSubs is empty array', async () => {
+    process.env.ADMIN_SECRET = 'admin-secret';
+    const { status, body } = await req(
+      'POST', '/admin/orgs',
+      { id: 'bad-org', licenseKey: 'lk-x', allowedSubs: [] },
+      { Authorization: 'Bearer admin-secret' }
+    );
+    assert.equal(status, 400);
+    assert.equal(body.success, false);
   });
 });
 

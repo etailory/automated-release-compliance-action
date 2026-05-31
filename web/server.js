@@ -67,6 +67,87 @@ function evictExpiredJobs() {
 }
 
 // ---------------------------------------------------------------------------
+// Organization registry
+//
+// Maps organizationId → { licenseKey, allowedSubs }.
+// When non-empty (enforcement mode), the verify and audit endpoints require
+// the calling org to be registered here.
+// When empty (dev/test mode), org checks are bypassed — same pattern as
+// LICENSE_SECRET (any key accepted when the secret is unset).
+// ---------------------------------------------------------------------------
+
+/**
+ * @typedef {{ licenseKey: string, allowedSubs: string[] }} OrgEntry
+ */
+
+/** @type {Map<string, OrgEntry>} */
+export const orgRegistry = new Map();
+
+/**
+ * Seed the registry from the ORGS_CONFIG env var.
+ * Value must be a JSON array of { id, licenseKey, allowedSubs }.
+ * Exported so tests can re-invoke it after manipulating the env.
+ */
+export function _loadOrgsFromEnv() {
+  const raw = process.env.ORGS_CONFIG;
+  if (!raw) return;
+  let orgs;
+  try {
+    orgs = JSON.parse(raw);
+  } catch {
+    console.error('[WARN] ORGS_CONFIG is not valid JSON — organization registry not seeded.');
+    return;
+  }
+  if (!Array.isArray(orgs)) {
+    console.error('[WARN] ORGS_CONFIG must be a JSON array — organization registry not seeded.');
+    return;
+  }
+  for (const org of orgs) {
+    if (typeof org.id === 'string' && typeof org.licenseKey === 'string' && Array.isArray(org.allowedSubs)) {
+      orgRegistry.set(org.id, { licenseKey: org.licenseKey, allowedSubs: org.allowedSubs });
+    } else {
+      console.warn(`[WARN] Skipping invalid org entry in ORGS_CONFIG: ${JSON.stringify(org)}`);
+    }
+  }
+  if (orgRegistry.size > 0) {
+    console.log(`[orgRegistry] Loaded ${orgRegistry.size} org(s) from ORGS_CONFIG.`);
+  }
+}
+
+_loadOrgsFromEnv();
+
+/** Returns true when the registry has at least one org (enforcement mode). */
+function isRegistryEnforced() {
+  return orgRegistry.size > 0;
+}
+
+/**
+ * Match a subject string against a single pattern.
+ * Supports trailing-wildcard glob ("repo:acme/*") and exact match.
+ *
+ * @param {string} subject
+ * @param {string} pattern
+ * @returns {boolean}
+ */
+function matchSubPattern(subject, pattern) {
+  if (pattern.endsWith('*')) {
+    return subject.startsWith(pattern.slice(0, -1));
+  }
+  return subject === pattern;
+}
+
+/**
+ * Returns true when subject matches at least one pattern in the list.
+ *
+ * @param {string} subject
+ * @param {string[]} patterns
+ * @returns {boolean}
+ */
+function matchesAnyPattern(subject, patterns) {
+  return patterns.some(p => matchSubPattern(subject, p));
+}
+
+// ---------------------------------------------------------------------------
 // JWKS cache — exported so tests can reset between runs
 // ---------------------------------------------------------------------------
 
@@ -186,10 +267,31 @@ app.post('/api/v1/compliance/verify', verifyLimiter, async (req, res) => {
       });
     }
 
+    // Org registry check (skipped in dev mode when registry is empty)
+    let orgAllowedSubs;
+    if (isRegistryEnforced()) {
+      const org = orgRegistry.get(organizationId);
+      if (!org) {
+        return res.status(403).json({
+          success: false,
+          error:   `Organization not registered: ${organizationId}`,
+        });
+      }
+      // Pre-flight: federationRuleId must match one of the org's allowed sub patterns
+      if (!matchesAnyPattern(federationRuleId, org.allowedSubs)) {
+        return res.status(401).json({
+          success: false,
+          error:   `federationRuleId '${federationRuleId}' does not match any allowed sub pattern for organization '${organizationId}'`,
+        });
+      }
+      orgAllowedSubs = org.allowedSubs;
+    }
+
     const verificationResult = await verifyOidcAndIssueSession({
       oidcToken,
       organizationId,
       federationRuleId,
+      allowedSubs: orgAllowedSubs,
     });
 
     return res.status(200).json({
@@ -252,11 +354,22 @@ app.post('/api/v1/compliance/audit', auditLimiter, async (req, res) => {
       });
     }
 
-    if (!(await validateBearerToken(bearerToken))) {
+    const authResult = await authenticateBearerToken(bearerToken);
+    if (!authResult.valid) {
       return res.status(401).json({
         success: false,
         error:   'Invalid authorization token.',
       });
+    }
+
+    // When registry is enforced, verify the org hasn't been evicted
+    if (isRegistryEnforced() && authResult.orgId) {
+      if (!orgRegistry.has(authResult.orgId)) {
+        return res.status(403).json({
+          success: false,
+          error:   `Organization '${authResult.orgId}' is not registered or has been evicted.`,
+        });
+      }
     }
 
     const { schemaVersion, repository, release, requested } = req.body ?? {};
@@ -324,6 +437,60 @@ app.get('/api/v1/compliance/audit/:jobId', async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// POST /admin/orgs
+//
+// Register or update an organization in the registry at runtime without a
+// server restart. Protected by the ADMIN_SECRET env var.
+//
+// Expected request body: { id, licenseKey, allowedSubs }
+// ---------------------------------------------------------------------------
+
+app.post('/admin/orgs', (req, res) => {
+  const adminSecret = process.env.ADMIN_SECRET;
+  if (!adminSecret) {
+    return res.status(503).json({
+      success: false,
+      error:   'Admin endpoint is disabled (ADMIN_SECRET not configured).',
+    });
+  }
+
+  const authHeader = req.headers['authorization'] ?? '';
+  const provided   = authHeader.startsWith('Bearer ')
+    ? authHeader.slice('Bearer '.length).trim()
+    : '';
+
+  let authorized = false;
+  try {
+    const secretBuf   = Buffer.from(adminSecret);
+    const providedBuf = Buffer.from(provided);
+    authorized = secretBuf.length === providedBuf.length &&
+      crypto.timingSafeEqual(secretBuf, providedBuf);
+  } catch {
+    // fall through — authorized stays false
+  }
+
+  if (!authorized) {
+    return res.status(401).json({ success: false, error: 'Unauthorized.' });
+  }
+
+  const { id, licenseKey, allowedSubs } = req.body ?? {};
+  if (
+    typeof id !== 'string' || !id ||
+    typeof licenseKey !== 'string' || !licenseKey ||
+    !Array.isArray(allowedSubs) || allowedSubs.length === 0
+  ) {
+    return res.status(400).json({
+      success: false,
+      error:   'Required fields: id (string), licenseKey (string), allowedSubs (non-empty array)',
+    });
+  }
+
+  orgRegistry.set(id, { licenseKey, allowedSubs });
+  console.log(`[/admin/orgs] Registered org: ${id}`);
+  return res.status(200).json({ success: true, message: `Organization '${id}' registered.` });
+});
+
+// ---------------------------------------------------------------------------
 // 404 fallback
 // ---------------------------------------------------------------------------
 
@@ -363,23 +530,66 @@ export function validateLicenseKey(licenseKey) {
 }
 
 /**
- * Validate a bearer token — accepts either an HMAC-signed session token
- * issued by the verify endpoint, or a plain license key.
+ * Authenticate a bearer token. Returns { valid, orgId? }.
+ *
+ * Accepts either an HMAC-signed session token (JWT) or a plain license key.
+ *
+ * When the org registry is enforced (non-empty):
+ *   - Session token: orgId is extracted and returned for the caller to verify.
+ *   - License key: scans org license keys for a match; falls back to
+ *     LICENSE_SECRET for single-tenant installs (orgId will be null in that case).
+ *
+ * When the registry is empty (dev/test mode):
+ *   - Behaves like the legacy validateLicenseKey (accepts any key when
+ *     LICENSE_SECRET is unset).
  *
  * @param {string} token
- * @returns {Promise<boolean>}
+ * @returns {Promise<{ valid: boolean, orgId?: string | null }>}
  */
-async function validateBearerToken(token) {
-  // JWT detection: three dot-separated parts
+async function authenticateBearerToken(token) {
+  // JWT: three dot-separated parts
   if (token.split('.').length === 3) {
     try {
       const { payload } = await jwtVerify(token, getSessionSecret());
-      if (payload.sub && payload.orgId) return true;
+      if (payload.sub && payload.orgId) {
+        return { valid: true, orgId: String(payload.orgId) };
+      }
     } catch {
-      // Not a valid session token — fall through to license key check
+      // Not a valid session token — fall through
     }
   }
-  return validateLicenseKey(token);
+
+  if (isRegistryEnforced()) {
+    // Multi-tenant: check each registered org's license key
+    for (const [orgId, org] of orgRegistry) {
+      try {
+        const orgKeyBuf = Buffer.from(org.licenseKey);
+        const tokenBuf  = Buffer.from(token);
+        if (orgKeyBuf.length === tokenBuf.length && crypto.timingSafeEqual(orgKeyBuf, tokenBuf)) {
+          return { valid: true, orgId };
+        }
+      } catch {
+        // skip malformed key entry
+      }
+    }
+    // Single-tenant fallback: LICENSE_SECRET
+    const secret = process.env.LICENSE_SECRET;
+    if (secret) {
+      try {
+        const secretBuf = Buffer.from(secret);
+        const tokenBuf  = Buffer.from(token);
+        if (secretBuf.length === tokenBuf.length && crypto.timingSafeEqual(secretBuf, tokenBuf)) {
+          return { valid: true, orgId: null };
+        }
+      } catch {
+        // skip
+      }
+    }
+    return { valid: false };
+  }
+
+  // Dev mode: use LICENSE_SECRET check (accepts any key when unset)
+  return { valid: validateLicenseKey(token) };
 }
 
 /**
@@ -486,10 +696,10 @@ async function getAuditJobStatus(jobId) {
  * Throws with statusCode 503 if the JWKS endpoint is unreachable.
  * Throws with statusCode 401 if token verification fails.
  *
- * @param {{ oidcToken: string, organizationId: string, federationRuleId: string }} params
+ * @param {{ oidcToken: string, organizationId: string, federationRuleId: string, allowedSubs?: string[] }} params
  * @returns {Promise<{ sessionToken: string, expiresIn: number }>}
  */
-async function verifyOidcAndIssueSession({ oidcToken, organizationId, federationRuleId }) {
+async function verifyOidcAndIssueSession({ oidcToken, organizationId, federationRuleId, allowedSubs }) {
   const oidcIssuer   = process.env.OIDC_ISSUER   ?? 'https://token.actions.githubusercontent.com';
   const oidcAudience = process.env.OIDC_AUDIENCE ?? 'governor-os';
 
@@ -516,8 +726,16 @@ async function verifyOidcAndIssueSession({ oidcToken, organizationId, federation
     throw e;
   }
 
-  // Validate sub against federationRuleId using prefix match
   const sub = payload.sub ?? '';
+
+  // When org registry is enforced, validate sub against the org's allowed patterns
+  if (allowedSubs && !matchesAnyPattern(sub, allowedSubs)) {
+    const e = new Error(`OIDC token sub does not match any allowed sub pattern for organization '${organizationId}'`);
+    e.statusCode = 401;
+    throw e;
+  }
+
+  // Validate sub against federationRuleId using prefix match
   if (!sub.startsWith(federationRuleId)) {
     const e = new Error(`OIDC token sub does not satisfy federation rule '${federationRuleId}'`);
     e.statusCode = 401;
