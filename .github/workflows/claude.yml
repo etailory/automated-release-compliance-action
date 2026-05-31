@@ -25,9 +25,10 @@ jobs:
       id-token: write
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
         with:
           fetch-depth: 1
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Run Claude Code
         id: claude
@@ -37,6 +38,6 @@ jobs:
           claude_args: |
             --model claude-sonnet-4-6
             --max-turns 40
-            --allowedTools "Bash(bun install),Bash(bun test),Bash(bun run build),Bash(bun typecheck),Bash,Edit,Write,Read,Glob,Grep"
+            --allowedTools "Bash,Edit,Write,Read,Glob,Grep"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
