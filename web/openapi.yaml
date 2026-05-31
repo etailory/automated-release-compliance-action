@@ -958,6 +958,167 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
+  /api/v1/compliance/audits/verify:
+    get:
+      tags: [compliance]
+      summary: Verify audit log integrity
+      description: |
+        Verifies the HMAC-SHA256 integrity signature of every audit log record
+        that matches the caller's org scope and optional filters. Returns a
+        machine-readable report suitable for handing to external auditors as
+        evidence that no records have been tampered with since they were written.
+
+        **Integrity values:**
+        - `"ok"` — all records have a valid signature (vacuously true for an empty log)
+        - `"compromised"` — at least one record has a signature that does not verify
+          (tamper detected)
+        - `"partial"` — no tampered records, but some records have no signature
+          (written before HMAC support was introduced)
+
+        **Authentication (enforcement mode):** When `LICENSE_SECRET` is set or
+        the organization registry is non-empty, a valid
+        `Authorization: Bearer <session-token|license-key>` header is required.
+        In development / free-tier mode (neither active) the endpoint is open.
+
+        **Org scope (enforcement mode):** When the authenticated token carries
+        an `orgId` (registry-enforced multi-tenant mode), only records whose
+        repository owner matches the authenticated organization are verified.
+        Single-tenant `LICENSE_SECRET` mode verifies all records.
+
+        **Filtering:** Use `?repository=owner/repo` (exact match), `?from=` and
+        `?to=` (ISO 8601 dates) to restrict records. Filters are applied on top
+        of the org-scope filter, not instead of it.
+
+        **Rate limit:** 30 requests per minute per IP.
+      operationId: verifyAuditIntegrity
+      security:
+        - BearerAuth: []
+        - {}  # security is optional — open in dev/free-tier mode
+      parameters:
+        - name: repository
+          in: query
+          required: false
+          schema:
+            type: string
+          description: |
+            Filter by repository in `owner/repo` format (exact match).
+            When omitted, all repositories accessible to the authenticated caller are verified.
+          example: "acme/widgets"
+        - name: from
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+          description: |
+            Inclusive lower bound on `submittedAt` (ISO 8601). Records submitted
+            before this date are excluded from the integrity check.
+          example: "2026-01-01T00:00:00Z"
+        - name: to
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+          description: |
+            Inclusive upper bound on `submittedAt` (ISO 8601). Records submitted
+            after this date are excluded from the integrity check.
+          example: "2026-12-31T23:59:59Z"
+      responses:
+        "200":
+          description: Integrity report generated successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, verifiedAt, total, verified, failed, integrity, records]
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  verifiedAt:
+                    type: string
+                    format: date-time
+                    description: Timestamp when the integrity check was performed
+                    example: "2026-05-31T12:00:00.000Z"
+                  total:
+                    type: integer
+                    description: Total number of records checked
+                    example: 42
+                  verified:
+                    type: integer
+                    description: Number of records whose HMAC signature is valid
+                    example: 42
+                  failed:
+                    type: integer
+                    description: Number of records with a missing or invalid signature
+                    example: 0
+                  integrity:
+                    type: string
+                    enum: [ok, compromised, partial]
+                    description: |
+                      - `ok` — all records verified (or log is empty)
+                      - `compromised` — at least one record has a sig that does not verify
+                      - `partial` — no tampered records but some records have no sig (legacy)
+                    example: "ok"
+                  records:
+                    type: array
+                    description: Per-record integrity results
+                    items:
+                      type: object
+                      required: [jobId, repository, tag, submittedAt, verified]
+                      properties:
+                        jobId:
+                          type: string
+                          example: "audit-acme_widgets-v1.2.0-1748692800000"
+                        repository:
+                          type: string
+                          example: "acme/widgets"
+                        tag:
+                          type: string
+                          example: "v1.2.0"
+                        submittedAt:
+                          type: string
+                          format: date-time
+                          example: "2026-05-31T12:00:00.000Z"
+                        verified:
+                          type: boolean
+                          description: |
+                            `true` when the record's HMAC signature is valid.
+                            `false` when the record has no signature (unsigned legacy) or
+                            when the signature does not match (tampered).
+                          example: true
+        "400":
+          description: Invalid `from` or `to` query parameter
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "401":
+          description: Missing or invalid Authorization header (enforcement mode only)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "403":
+          description: Organization not registered or evicted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "429":
+          description: Rate limit exceeded (30 requests per minute per IP)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
   /admin/orgs:
     post:
       tags: [admin]

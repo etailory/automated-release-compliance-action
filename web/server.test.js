@@ -31,6 +31,7 @@ import {
   _loadOrgsFromEnv,
   _findJobsInAuditLog,
   _verifyAuditRecord,
+  _verifyIntegrityLimiterStore,
 } from './server.js';
 
 // ---------------------------------------------------------------------------
@@ -119,6 +120,7 @@ beforeEach(async () => {
   await _getAuditLimiterStore.resetAll?.();
   await _listAuditsLimiterStore.resetAll?.();
   await _exportAuditsLimiterStore.resetAll?.();
+  await _verifyIntegrityLimiterStore.resetAll?.();
   // Ensure sensitive env vars are unset by default
   delete process.env.LICENSE_SECRET;
   delete process.env.ADMIN_SECRET;
@@ -2474,5 +2476,278 @@ describe('GET /api/v1/compliance/audits/export — verified field', () => {
     assert.equal(lines.length, 2);
     assert.ok(lines[0].endsWith(',verified'), 'CSV header must end with ,verified');
     assert.ok(lines[1].endsWith(',true'), 'CSV data row must end with ,true for a verified record');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/compliance/audits/verify — integrity report
+// ---------------------------------------------------------------------------
+
+describe('GET /api/v1/compliance/audits/verify — response shape', () => {
+  const AUTH = { Authorization: 'Bearer test-key' };
+
+  test('returns 200 with integrity: "ok" for empty audit log', async () => {
+    const { status, body } = await req('GET', '/api/v1/compliance/audits/verify');
+    assert.equal(status, 200);
+    assert.equal(body.success, true);
+    assert.equal(body.total, 0);
+    assert.equal(body.verified, 0);
+    assert.equal(body.failed, 0);
+    assert.equal(body.integrity, 'ok');
+    assert.ok(Array.isArray(body.records));
+    assert.equal(body.records.length, 0);
+    assert.ok(typeof body.verifiedAt === 'string', 'verifiedAt must be present');
+  });
+
+  test('returns correct shape for each record in the records array', async () => {
+    await req('POST', '/api/v1/compliance/audit', VALID_AUDIT_PAYLOAD, AUTH);
+    const { status, body } = await req('GET', '/api/v1/compliance/audits/verify');
+    assert.equal(status, 200);
+    assert.equal(body.records.length, 1);
+    const r = body.records[0];
+    assert.ok('jobId'       in r, 'record must have jobId');
+    assert.ok('repository'  in r, 'record must have repository');
+    assert.ok('tag'         in r, 'record must have tag');
+    assert.ok('submittedAt' in r, 'record must have submittedAt');
+    assert.ok('verified'    in r, 'record must have verified');
+    assert.equal(typeof r.verified, 'boolean', 'verified must be a boolean');
+  });
+});
+
+describe('GET /api/v1/compliance/audits/verify — integrity values', () => {
+  const AUTH = { Authorization: 'Bearer test-key' };
+
+  test('integrity: "ok" when all records have a valid sig', async () => {
+    await req('POST', '/api/v1/compliance/audit', VALID_AUDIT_PAYLOAD, AUTH);
+    await req('POST', '/api/v1/compliance/audit', VALID_AUDIT_PAYLOAD, AUTH);
+
+    const { body } = await req('GET', '/api/v1/compliance/audits/verify');
+    assert.equal(body.integrity, 'ok');
+    assert.equal(body.total, 2);
+    assert.equal(body.verified, 2);
+    assert.equal(body.failed, 0);
+    for (const r of body.records) {
+      assert.equal(r.verified, true);
+    }
+  });
+
+  test('integrity: "partial" when some records have no sig (unsigned legacy records)', async () => {
+    const { writeFile: wf } = await import('node:fs/promises');
+    const unsigned = {
+      jobId: 'j-unsigned', repository: 'acme/widgets', tag: 'v0.9.0',
+      submittedAt: '2026-01-01T00:00:00Z', completedAt: '2026-01-01T00:00:01Z',
+      status: 'complete',
+      result: { governanceVerdict: { verdict: 'approved' } },
+      // no sig field — pre-#52 legacy record
+    };
+    await wf(process.env.AUDIT_LOG_FILE, JSON.stringify(unsigned) + '\n', 'utf8');
+
+    // Add a freshly signed record via the API
+    await req('POST', '/api/v1/compliance/audit', VALID_AUDIT_PAYLOAD, AUTH);
+
+    const { body } = await req('GET', '/api/v1/compliance/audits/verify');
+    assert.equal(body.integrity, 'partial');
+    assert.equal(body.total, 2);
+    assert.equal(body.failed, 1);    // the unsigned record
+    assert.equal(body.verified, 1);  // the freshly signed one
+  });
+
+  test('integrity: "partial" when ALL records are unsigned legacy records', async () => {
+    const { writeFile: wf } = await import('node:fs/promises');
+    const unsigned = {
+      jobId: 'j-unsigned', repository: 'acme/widgets', tag: 'v0.9.0',
+      submittedAt: '2026-01-01T00:00:00Z', completedAt: '2026-01-01T00:00:01Z',
+      status: 'complete',
+    };
+    await wf(process.env.AUDIT_LOG_FILE, JSON.stringify(unsigned) + '\n', 'utf8');
+
+    const { body } = await req('GET', '/api/v1/compliance/audits/verify');
+    assert.equal(body.integrity, 'partial');
+    assert.equal(body.total, 1);
+    assert.equal(body.failed, 1);
+    assert.equal(body.verified, 0);
+  });
+
+  test('integrity: "compromised" when a record has a sig that does not verify', async () => {
+    const { writeFile: wf } = await import('node:fs/promises');
+    const tampered = {
+      jobId: 'j-tampered', repository: 'acme/widgets', tag: 'v1.0.0',
+      submittedAt: '2026-01-01T00:00:00Z', completedAt: '2026-01-01T00:00:01Z',
+      status: 'complete',
+      result: { governanceVerdict: { verdict: 'approved' } },
+      sig: 'deadbeef'.repeat(8), // invalid hex sig
+    };
+    await wf(process.env.AUDIT_LOG_FILE, JSON.stringify(tampered) + '\n', 'utf8');
+
+    const { body } = await req('GET', '/api/v1/compliance/audits/verify');
+    assert.equal(body.integrity, 'compromised');
+    assert.equal(body.failed, 1);
+    assert.equal(body.records[0].verified, false);
+  });
+
+  test('integrity: "compromised" takes precedence when both tampered and unsigned records exist', async () => {
+    const { writeFile: wf } = await import('node:fs/promises');
+    const unsigned  = {
+      jobId: 'j-unsigned', repository: 'acme/widgets', tag: 'v0.8.0',
+      submittedAt: '2026-01-01T00:00:00Z', status: 'complete',
+    };
+    const tampered  = {
+      jobId: 'j-tampered', repository: 'acme/widgets', tag: 'v0.9.0',
+      submittedAt: '2026-01-02T00:00:00Z', status: 'complete',
+      result: { governanceVerdict: { verdict: 'approved' } },
+      sig: 'deadbeef'.repeat(8),
+    };
+    await wf(process.env.AUDIT_LOG_FILE,
+      [unsigned, tampered].map(r => JSON.stringify(r)).join('\n') + '\n', 'utf8');
+
+    const { body } = await req('GET', '/api/v1/compliance/audits/verify');
+    assert.equal(body.integrity, 'compromised', '"compromised" must take precedence over "partial"');
+    assert.equal(body.total, 2);
+    assert.equal(body.failed, 2);
+  });
+
+  test('integrity: "ok" when the tampered record is outside the ?repository filter', async () => {
+    const { writeFile: wf } = await import('node:fs/promises');
+    const good = {
+      jobId: 'j-good', repository: 'acme/widgets', tag: 'v1.0.0',
+      submittedAt: '2026-01-01T00:00:00Z', status: 'complete',
+      result: { governanceVerdict: { verdict: 'approved' } },
+      sig: 'deadbeef'.repeat(8), // invalid, but belongs to a different repo
+    };
+    await wf(process.env.AUDIT_LOG_FILE, JSON.stringify(good) + '\n', 'utf8');
+
+    // Filter to a different repo — the tampered record is excluded
+    await req('POST', '/api/v1/compliance/audit',
+      { ...VALID_AUDIT_PAYLOAD, repository: 'acme/other-repo' }, AUTH);
+
+    const { body } = await req('GET', '/api/v1/compliance/audits/verify?repository=acme%2Fother-repo');
+    assert.equal(body.integrity, 'ok');
+    assert.equal(body.total, 1);
+    assert.equal(body.verified, 1);
+  });
+});
+
+describe('GET /api/v1/compliance/audits/verify — auth enforcement', () => {
+  test('returns 401 when LICENSE_SECRET is set and Authorization is absent', async () => {
+    process.env.LICENSE_SECRET = 'secret-key';
+    const { status, body } = await req('GET', '/api/v1/compliance/audits/verify');
+    assert.equal(status, 401);
+    assert.equal(body.success, false);
+  });
+
+  test('returns 401 when LICENSE_SECRET is set and token is invalid', async () => {
+    process.env.LICENSE_SECRET = 'secret-key';
+    const { status, body } = await req('GET', '/api/v1/compliance/audits/verify', undefined, {
+      Authorization: 'Bearer wrong-key',
+    });
+    assert.equal(status, 401);
+    assert.equal(body.success, false);
+  });
+
+  test('returns 200 when LICENSE_SECRET is set and token matches', async () => {
+    process.env.LICENSE_SECRET = 'secret-key';
+    const { status, body } = await req('GET', '/api/v1/compliance/audits/verify', undefined, {
+      Authorization: 'Bearer secret-key',
+    });
+    assert.equal(status, 200);
+    assert.equal(body.success, true);
+  });
+
+  test('returns 401 when org registry is enforced and Authorization is absent', async () => {
+    orgRegistry.set('acme', { licenseKey: 'lk-acme', allowedSubs: ['repo:acme/*'] });
+    const { status, body } = await req('GET', '/api/v1/compliance/audits/verify');
+    assert.equal(status, 401);
+    assert.equal(body.success, false);
+  });
+
+  test('dev mode allows unauthenticated access', async () => {
+    const { status, body } = await req('GET', '/api/v1/compliance/audits/verify');
+    assert.equal(status, 200);
+    assert.equal(body.success, true);
+  });
+
+  test('multi-tenant: only verifies records for the authenticated org', async () => {
+    orgRegistry.set('acme',       { licenseKey: 'lk-acme',  allowedSubs: ['repo:acme/*'] });
+    orgRegistry.set('other-corp', { licenseKey: 'lk-other', allowedSubs: ['repo:other-corp/*'] });
+
+    const acmePayload  = { ...VALID_AUDIT_PAYLOAD, repository: 'acme/widgets' };
+    const otherPayload = { ...VALID_AUDIT_PAYLOAD, repository: 'other-corp/app' };
+    await req('POST', '/api/v1/compliance/audit', acmePayload,  { Authorization: 'Bearer lk-acme' });
+    await req('POST', '/api/v1/compliance/audit', otherPayload, { Authorization: 'Bearer lk-other' });
+
+    const { body } = await req('GET', '/api/v1/compliance/audits/verify', undefined, {
+      Authorization: 'Bearer lk-acme',
+    });
+    assert.equal(body.success, true);
+    assert.equal(body.total, 1, 'acme should only see its own record');
+    assert.equal(body.records[0].repository.split('/')[0], 'acme');
+  });
+});
+
+describe('GET /api/v1/compliance/audits/verify — filters', () => {
+  const AUTH = { Authorization: 'Bearer test-key' };
+
+  test('?repository filter restricts records for integrity check', async () => {
+    const p1 = { ...VALID_AUDIT_PAYLOAD, repository: 'acme/widgets' };
+    const p2 = { ...VALID_AUDIT_PAYLOAD, repository: 'acme/other-repo' };
+    await req('POST', '/api/v1/compliance/audit', p1, AUTH);
+    await req('POST', '/api/v1/compliance/audit', p2, AUTH);
+
+    const { body } = await req('GET', '/api/v1/compliance/audits/verify?repository=acme%2Fwidgets');
+    assert.equal(body.total, 1);
+    assert.equal(body.records[0].repository, 'acme/widgets');
+    assert.equal(body.integrity, 'ok');
+  });
+
+  test('?from filters out records before the date', async () => {
+    await req('POST', '/api/v1/compliance/audit', VALID_AUDIT_PAYLOAD, AUTH);
+    const futureFrom = '2099-01-01T00:00:00Z';
+    const { body } = await req('GET', `/api/v1/compliance/audits/verify?from=${encodeURIComponent(futureFrom)}`);
+    assert.equal(body.total, 0);
+    assert.equal(body.integrity, 'ok');  // vacuously true for empty set
+  });
+
+  test('?to filters out records after the date', async () => {
+    await req('POST', '/api/v1/compliance/audit', VALID_AUDIT_PAYLOAD, AUTH);
+    const pastTo = '2000-01-01T00:00:00Z';
+    const { body } = await req('GET', `/api/v1/compliance/audits/verify?to=${encodeURIComponent(pastTo)}`);
+    assert.equal(body.total, 0);
+    assert.equal(body.integrity, 'ok');
+  });
+
+  test('invalid ?from returns 400', async () => {
+    const { status, body } = await req('GET', '/api/v1/compliance/audits/verify?from=not-a-date');
+    assert.equal(status, 400);
+    assert.equal(body.success, false);
+    assert.match(body.error, /from date/);
+  });
+
+  test('invalid ?to returns 400', async () => {
+    const { status, body } = await req('GET', '/api/v1/compliance/audits/verify?to=not-a-date');
+    assert.equal(status, 400);
+    assert.equal(body.success, false);
+    assert.match(body.error, /to date/);
+  });
+
+  test('date range that covers "now" includes fresh records', async () => {
+    await req('POST', '/api/v1/compliance/audit', VALID_AUDIT_PAYLOAD, AUTH);
+    const from = '2020-01-01T00:00:00Z';
+    const to   = '2099-12-31T23:59:59Z';
+    const { body } = await req('GET',
+      `/api/v1/compliance/audits/verify?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`);
+    assert.equal(body.total, 1);
+    assert.equal(body.integrity, 'ok');
+  });
+});
+
+describe('GET /api/v1/compliance/audits/verify — rate limiting', () => {
+  test('returns 429 after exceeding 30 requests per minute', async () => {
+    const responses = await Promise.all(
+      Array.from({ length: 35 }, () => req('GET', '/api/v1/compliance/audits/verify')),
+    );
+    const tooMany = responses.filter(r => r.status === 429);
+    assert.ok(tooMany.length >= 1, 'Expected at least one 429 response');
+    assert.equal(tooMany[0].body.success, false);
+    assert.match(tooMany[0].body.error, /Too many/);
   });
 });

@@ -10,6 +10,7 @@
  *   GET  /api/v1/compliance/audit/:jobId    — Retrieve audit job status and result
  *   GET  /api/v1/compliance/audits          — List org audit history from durable log
  *   GET  /api/v1/compliance/audits/export   — Export org audit history as CSV or JSON
+ *   GET  /api/v1/compliance/audits/verify   — One-click integrity report for the audit log
  */
 
 import crypto from 'node:crypto';
@@ -444,11 +445,12 @@ export function _verifyAuditRecord(record) {
 // Rate limiters — exported so tests can reset stores between runs
 // ---------------------------------------------------------------------------
 
-export const _auditLimiterStore        = new MemoryStore();
-export const _verifyLimiterStore       = new MemoryStore();
-export const _getAuditLimiterStore     = new MemoryStore();
-export const _listAuditsLimiterStore   = new MemoryStore();
-export const _exportAuditsLimiterStore = new MemoryStore();
+export const _auditLimiterStore               = new MemoryStore();
+export const _verifyLimiterStore              = new MemoryStore();
+export const _getAuditLimiterStore            = new MemoryStore();
+export const _listAuditsLimiterStore          = new MemoryStore();
+export const _exportAuditsLimiterStore        = new MemoryStore();
+export const _verifyIntegrityLimiterStore     = new MemoryStore();
 
 const auditLimiter = rateLimit({
   windowMs:       60_000,
@@ -490,6 +492,15 @@ const exportAuditsLimiter = rateLimit({
   windowMs:       60_000,
   max:            30,
   store:          _exportAuditsLimiterStore,
+  standardHeaders: true,
+  legacyHeaders:  false,
+  message: { success: false, error: 'Too many requests. Please retry after 1 minute.' },
+});
+
+const verifyIntegrityLimiter = rateLimit({
+  windowMs:       60_000,
+  max:            30,
+  store:          _verifyIntegrityLimiterStore,
   standardHeaders: true,
   legacyHeaders:  false,
   message: { success: false, error: 'Too many requests. Please retry after 1 minute.' },
@@ -1043,6 +1054,166 @@ app.get('/api/v1/compliance/audits/export', exportAuditsLimiter, async (req, res
   } catch (error) {
     console.error('[GET /api/v1/compliance/audits/export] Error:', error);
     return res.status(500).json({ success: false, error: 'Internal server error exporting audit history.' });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/compliance/audits/verify
+//
+// Verifies the HMAC integrity of every audit log record that matches the
+// caller's org scope and optional filters. Returns a machine-readable report
+// for compliance officers to hand to external auditors.
+//
+// Query params (same semantics as /export):
+//   repository — exact-match repository filter (e.g. 'acme/widgets')
+//   from       — ISO 8601 lower bound on submittedAt (inclusive)
+//   to         — ISO 8601 upper bound on submittedAt (inclusive)
+//
+// Same auth rules and rate limit (30 req/min) as GET /api/v1/compliance/audits.
+//
+// Response:
+//   {
+//     success:    true,
+//     verifiedAt: "<ISO 8601>",
+//     total:      <n>,
+//     verified:   <n>,        // records where sig matches
+//     failed:     <n>,        // records where sig missing or mismatches
+//     integrity:  "ok" | "compromised" | "partial",
+//     records:    [{ jobId, repository, tag, submittedAt, verified }]
+//   }
+//
+// integrity logic:
+//   "ok"          — all records have a valid sig (vacuously true for empty log)
+//   "compromised" — at least one record has a sig that does NOT verify (tamper detected)
+//   "partial"     — no tampered records but some records have no sig (pre-#52 legacy)
+// ---------------------------------------------------------------------------
+
+app.get('/api/v1/compliance/audits/verify', verifyIntegrityLimiter, async (req, res) => {
+  try {
+    // Auth — identical to GET /api/v1/compliance/audits
+    let authResult = null;
+    if (process.env.LICENSE_SECRET || isRegistryEnforced()) {
+      const authHeader  = req.headers['authorization'] ?? '';
+      const bearerToken = authHeader.startsWith('Bearer ')
+        ? authHeader.slice('Bearer '.length).trim()
+        : '';
+
+      if (!bearerToken) {
+        return res.status(401).json({
+          success: false,
+          error:   'Missing or invalid Authorization header. Expected: Bearer <license-key|session-token>',
+        });
+      }
+
+      authResult = await authenticateBearerToken(bearerToken);
+      if (!authResult.valid) {
+        return res.status(401).json({ success: false, error: 'Invalid authorization token.' });
+      }
+
+      if (isRegistryEnforced() && authResult.orgId) {
+        if (!orgRegistry.has(authResult.orgId)) {
+          return res.status(403).json({
+            success: false,
+            error:   `Organization '${authResult.orgId}' is not registered or has been evicted.`,
+          });
+        }
+      }
+    }
+
+    // Parse ?repository filter
+    const repository = (typeof req.query.repository === 'string' && req.query.repository)
+      ? req.query.repository
+      : null;
+
+    // Parse ?from and ?to date bounds
+    let from = null;
+    let to   = null;
+    if (req.query.from !== undefined) {
+      const d = new Date(req.query.from);
+      if (isNaN(d.getTime())) {
+        return res.status(400).json({
+          success: false,
+          error:   'Invalid from date: must be an ISO 8601 date string.',
+        });
+      }
+      from = d;
+    }
+    if (req.query.to !== undefined) {
+      const d = new Date(req.query.to);
+      if (isNaN(d.getTime())) {
+        return res.status(400).json({
+          success: false,
+          error:   'Invalid to date: must be an ISO 8601 date string.',
+        });
+      }
+      to = d;
+    }
+
+    // Org scope
+    const orgId = (isRegistryEnforced() && authResult?.orgId) ? authResult.orgId : null;
+
+    // Fetch all matching records (no pagination for integrity checks)
+    const { records: allRecords } = await _findJobsInAuditLog({
+      orgId,
+      limit:  Number.MAX_SAFE_INTEGER,
+      offset: 0,
+      repository,
+    });
+
+    // Apply date range filter on submittedAt
+    const records = (from === null && to === null)
+      ? allRecords
+      : allRecords.filter(r => {
+          const ts = r.submittedAt ? new Date(r.submittedAt) : null;
+          if (!ts || isNaN(ts.getTime())) return true;
+          if (from !== null && ts < from) return false;
+          if (to   !== null && ts > to)   return false;
+          return true;
+        });
+
+    // Compute integrity status across all matched records.
+    // A record with `sig` that fails verification → compromised.
+    // A record with no `sig` → unsigned legacy (pre-#52).
+    // "compromised" takes precedence over "partial".
+    let hasCompromised = false;
+    let hasUnsigned    = false;
+    let verifiedCount  = 0;
+    let failedCount    = 0;
+
+    for (const record of records) {
+      if (record.verified) {
+        verifiedCount++;
+      } else {
+        failedCount++;
+        if (!record.sig) {
+          hasUnsigned = true;
+        } else {
+          hasCompromised = true;
+        }
+      }
+    }
+
+    const integrity = hasCompromised ? 'compromised' : hasUnsigned ? 'partial' : 'ok';
+
+    return res.status(200).json({
+      success:    true,
+      verifiedAt: new Date().toISOString(),
+      total:      records.length,
+      verified:   verifiedCount,
+      failed:     failedCount,
+      integrity,
+      records: records.map(r => ({
+        jobId:       r.jobId       ?? '',
+        repository:  r.repository  ?? '',
+        tag:         r.tag         ?? '',
+        submittedAt: r.submittedAt ?? '',
+        verified:    r.verified    ?? false,
+      })),
+    });
+
+  } catch (error) {
+    console.error('[GET /api/v1/compliance/audits/verify] Error:', error);
+    return res.status(500).json({ success: false, error: 'Internal server error verifying audit log integrity.' });
   }
 });
 
