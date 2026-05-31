@@ -10,9 +10,10 @@ import { evaluateChecklist, getRulesForProfile } from "./checklist.js";
 import { runPremiumAudit } from "./premium.js";
 import { buildComplianceReport, computeReportHash, serializeReport } from "./report.js";
 import { buildJobSummary } from "./summary.js";
+import { buildFailureMessage } from "./messages.js";
 import type { ActionContext, CommitMetadata, Release, Repo, EvaluateResult, ComplianceProfile, Logger } from "./types.js";
 
-export { parseReleaseFromContext };
+export { parseReleaseFromContext, buildFailureMessage };
 
 /** Render the free-tier checklist results to the GitHub job summary + log. */
 async function reportFreeTier(
@@ -236,10 +237,12 @@ export async function run(): Promise<void> {
     }
 
     // --- Optional hard gate on the free-tier checklist. -----------------------
-    if (!evaluation.passed && failOnIncomplete) {
-      core.setFailed(
-        `Release compliance checklist incomplete: ${evaluation.score}/${evaluation.total} passed.`
+    if (evaluation.passed) {
+      core.info(
+        `✅ All ${evaluation.score}/${evaluation.total} compliance checks passed (profile: ${profile})`
       );
+    } else if (failOnIncomplete) {
+      core.setFailed(buildFailureMessage(profile, evaluation));
     }
   } catch (error) {
     core.setFailed(`Release compliance action failed: ${(error as Error).message}`);

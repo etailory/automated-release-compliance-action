@@ -1,7 +1,8 @@
 import { test, expect } from "bun:test";
 
 import { fetchReleaseCommits } from "../src/commits.js";
-import type { Logger, Repo } from "../src/types.js";
+import { buildFailureMessage } from "../src/messages.js";
+import type { EvaluateResult, Logger, Repo } from "../src/types.js";
 
 const REPO: Repo = { owner: "acme", repo: "widgets" };
 
@@ -98,4 +99,61 @@ test("fetchReleaseCommits deduplicates authors", async () => {
 
   expect(result!.authors).toEqual(["alice", "bob"]);
   expect(result!.count).toBe(3);
+});
+
+// --- buildFailureMessage ---
+
+test("buildFailureMessage includes profile, score, and failing rule labels", () => {
+  const evaluation: EvaluateResult = {
+    passed: false,
+    score: 4,
+    total: 6,
+    results: [
+      { id: "a", label: "Check A", ok: true, controlRef: "CTRL-1" },
+      { id: "b", label: "Release notes acknowledge security review or confirm no security impact", ok: false, controlRef: "A.12.1.2" },
+      { id: "c", label: "Release notes include a changelog or 'What's Changed' section heading", ok: false, controlRef: "CTRL-4" },
+    ],
+  };
+  const msg = buildFailureMessage("iso27001", evaluation);
+
+  expect(msg).toContain("iso27001");
+  expect(msg).toContain("4/6");
+  expect(msg).toContain("[A.12.1.2]");
+  expect(msg).toContain("Release notes acknowledge security review");
+  expect(msg).toContain("[CTRL-4]");
+  expect(msg).toContain("Release notes include a changelog");
+  // Passing check must not appear in the failure list
+  expect(msg).not.toContain("Check A");
+});
+
+test("buildFailureMessage omits controlRef bracket when not present", () => {
+  const evaluation: EvaluateResult = {
+    passed: false,
+    score: 0,
+    total: 1,
+    results: [{ id: "x", label: "Some rule", ok: false }],
+  };
+  const msg = buildFailureMessage("default", evaluation);
+
+  expect(msg).toContain("Some rule");
+  expect(msg).not.toMatch(/\[.*\] Some rule/);
+});
+
+test("buildFailureMessage with all checks failing lists all rules", () => {
+  const evaluation: EvaluateResult = {
+    passed: false,
+    score: 0,
+    total: 2,
+    results: [
+      { id: "a", label: "Rule Alpha", ok: false, controlRef: "CC8.1" },
+      { id: "b", label: "Rule Beta", ok: false, controlRef: "Art.9" },
+    ],
+  };
+  const msg = buildFailureMessage("soc2", evaluation);
+
+  expect(msg).toContain("[CC8.1]");
+  expect(msg).toContain("Rule Alpha");
+  expect(msg).toContain("[Art.9]");
+  expect(msg).toContain("Rule Beta");
+  expect(msg).toContain("0/2");
 });

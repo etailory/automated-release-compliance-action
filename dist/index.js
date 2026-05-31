@@ -23166,6 +23166,20 @@ async function buildJobSummary(params, builder) {
   await builder.write();
 }
 
+// src/messages.ts
+function buildFailureMessage(profile, evaluation) {
+  const failing = evaluation.results.filter((r) => !r.ok);
+  const lines = [
+    `Release compliance checklist incomplete (${profile}, ${evaluation.score}/${evaluation.total} passed). Failing checks:`,
+    ...failing.map((r) => {
+      const ref = r.controlRef ? `[${r.controlRef}] ` : "";
+      return `  - ${ref}${r.label}`;
+    })
+  ];
+  return lines.join(`
+`);
+}
+
 // src/index.ts
 async function reportFreeTier(repo, release, evaluation, profile, tier, generatedAt, reportPath, integrityHash) {
   core.info("─".repeat(60));
@@ -23296,8 +23310,10 @@ async function run() {
     } else {
       core.info("No license key provided — running free tier only. Add a 'license-key' input to enable premium AI compliance auditing.");
     }
-    if (!evaluation.passed && failOnIncomplete) {
-      core.setFailed(`Release compliance checklist incomplete: ${evaluation.score}/${evaluation.total} passed.`);
+    if (evaluation.passed) {
+      core.info(`✅ All ${evaluation.score}/${evaluation.total} compliance checks passed (profile: ${profile})`);
+    } else if (failOnIncomplete) {
+      core.setFailed(buildFailureMessage(profile, evaluation));
     }
   } catch (error) {
     core.setFailed(`Release compliance action failed: ${error.message}`);
@@ -23308,5 +23324,6 @@ if (__require.main == __require.module) {
 }
 export {
   run,
-  parseReleaseFromContext
+  parseReleaseFromContext,
+  buildFailureMessage
 };
