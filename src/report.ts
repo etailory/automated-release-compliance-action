@@ -12,6 +12,7 @@
  */
 
 import type {
+  CommitMetadata,
   ComplianceReport,
   EvaluateResult,
   Release,
@@ -42,10 +43,11 @@ export function buildComplianceReport(params: {
   evaluation: EvaluateResult;
   tier: "free" | "premium";
   generatedAt: string;
+  commits?: CommitMetadata;
 }): ComplianceReport {
-  const { release, repo, evaluation, tier, generatedAt } = params;
+  const { release, repo, evaluation, tier, generatedAt, commits } = params;
 
-  return {
+  const report: ComplianceReport = {
     schemaVersion: REPORT_SCHEMA_VERSION,
     generatedAt,
     tool: { name: TOOL_NAME, version: TOOL_VERSION },
@@ -71,6 +73,16 @@ export function buildComplianceReport(params: {
       })),
     },
   };
+
+  if (commits) {
+    report.commits = {
+      count: commits.count,
+      authors: [...commits.authors],
+      shas: [...commits.shas],
+    };
+  }
+
+  return report;
 }
 
 /**

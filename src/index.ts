@@ -4,61 +4,14 @@ import { dirname } from "node:path";
 import * as core from "@actions/core";
 import * as github from "@actions/github";
 
+import { fetchReleaseCommits } from "./commits.js";
+import { parseReleaseFromContext } from "./context.js";
 import { evaluateChecklist, getRulesForProfile } from "./checklist.js";
 import { runPremiumAudit } from "./premium.js";
 import { buildComplianceReport, serializeReport } from "./report.js";
-import type { Release, Repo, EvaluateResult, ActionContext, ComplianceProfile } from "./types.js";
+import type { ActionContext, CommitMetadata, Release, Repo, EvaluateResult, ComplianceProfile, Logger } from "./types.js";
 
-/**
- * Pull a normalized release object out of the event payload.
- *
- * Supports the `release` event (release.body) and falls back gracefully for
- * `push` tag events where no rich release body exists.
- */
-export function parseReleaseFromContext(context: ActionContext): {
-  release: Release | null;
-  body: string;
-} {
-  const payload = context.payload ?? {};
-  const release = payload.release as Record<string, unknown> | undefined;
-
-  if (release) {
-    return {
-      release: {
-        tag: release.tag_name as string,
-        name: (release.name as string) || (release.tag_name as string),
-        body: (release.body as string) || "",
-        isPrerelease: Boolean(release.prerelease),
-        isDraft: Boolean(release.draft),
-        publishedAt: (release.published_at as string) || null,
-        author: release.author
-          ? ((release.author as { login: string }).login ?? null)
-          : null,
-        url: (release.html_url as string) || null,
-      },
-      body: (release.body as string) || "",
-    };
-  }
-
-  // Tag push fallback: no release notes, but we can still report the ref.
-  const ref = (payload.ref as string | undefined) ?? context.ref ?? "";
-  const tag = ref.replace(/^refs\/tags\//, "");
-  return {
-    release: tag
-      ? {
-          tag,
-          name: tag,
-          body: "",
-          isPrerelease: false,
-          isDraft: false,
-          publishedAt: null,
-          author: context.actor ?? null,
-          url: null,
-        }
-      : null,
-    body: "",
-  };
-}
+export { parseReleaseFromContext };
 
 /** Render the free-tier checklist results to the GitHub job summary + log. */
 async function reportFreeTier(
@@ -110,7 +63,8 @@ function writeComplianceReport(
   release: Release,
   repo: Repo,
   evaluation: EvaluateResult,
-  tier: "free" | "premium"
+  tier: "free" | "premium",
+  commits?: CommitMetadata
 ): void {
   const report = buildComplianceReport({
     release,
@@ -118,6 +72,7 @@ function writeComplianceReport(
     evaluation,
     tier,
     generatedAt: new Date().toISOString(),
+    commits,
   });
 
   const dir = dirname(reportPath);
@@ -168,19 +123,34 @@ export async function run(): Promise<void> {
     const tier = licenseKey ? "premium" : "free";
     core.setOutput("tier", tier);
 
+    // --- Commit metadata enrichment: best-effort, release events only. --------
+    const repo = context.repo ?? { owner: "", repo: "" };
+    let commits: CommitMetadata | undefined;
+    if (context.payload.release) {
+      const octokit = github.getOctokit(token);
+      const logger: Logger = {
+        info: (m: string) => core.info(m),
+        warning: (m: string) => core.warning(m),
+        debug: (m: string) => core.debug(m),
+      };
+      commits = await fetchReleaseCommits(octokit as never, repo, release.tag, logger);
+      if (commits) {
+        core.info(
+          `Commit metadata: ${commits.count} commit(s) by ${commits.authors.join(", ")}`
+        );
+      }
+    }
+
     // --- Audit evidence: optional durable JSON report. ------------------------
     if (reportPath) {
-      const repo = context.repo ?? { owner: "", repo: "" };
-      writeComplianceReport(reportPath, release, repo, evaluation, tier);
+      writeComplianceReport(reportPath, release, repo, evaluation, tier, commits);
     }
 
     if (licenseKey) {
-      // `token` will be used by the future backend bridge to enrich the audit.
-      void token;
       await runPremiumAudit({
         licenseKey,
         release,
-        repo: context.repo ?? { owner: "", repo: "" },
+        repo,
         logger: {
           info: (m: string) => core.info(m),
           warning: (m: string) => core.warning(m),

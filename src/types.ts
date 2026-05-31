@@ -83,6 +83,16 @@ export interface ActionContext {
 
 export type ComplianceProfile = "default" | "iso27001" | "soc2" | "dora";
 
+/** Commit metadata fetched from the GitHub API for a release. */
+export interface CommitMetadata {
+  /** Number of commits in this release. */
+  count: number;
+  /** Unique committer logins (or names when login is unavailable). */
+  authors: string[];
+  /** Full commit SHAs for traceability. */
+  shas: string[];
+}
+
 /**
  * A durable, machine-readable record of a single release compliance evaluation.
  *
@@ -119,4 +129,6 @@ export interface ComplianceReport {
     total: number;
     checks: CheckResult[];
   };
+  /** Commit metadata fetched from the GitHub API (populated on release events). */
+  commits?: CommitMetadata;
 }

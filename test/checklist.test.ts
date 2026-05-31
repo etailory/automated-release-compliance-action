@@ -3,7 +3,7 @@ import { test, expect } from "bun:test";
 import { evaluateChecklist, getRulesForProfile, DEFAULT_RULES, ISO27001_RULES, SOC2_RULES, DORA_RULES } from "../src/checklist.js";
 import { buildAuditPayload } from "../src/premium.js";
 import { buildComplianceReport } from "../src/report.js";
-import { parseReleaseFromContext } from "../src/index.js";
+import { parseReleaseFromContext } from "../src/context.js";
 import type { Release, Repo } from "../src/types.js";
 
 test("checklist passes for a well-documented release", () => {

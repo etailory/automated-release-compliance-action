@@ -22715,6 +22715,88 @@ var github = __toESM(require_github(), 1);
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 
+// src/commits.ts
+function extractAuthors(commits) {
+  return [
+    ...new Set(commits.map((c) => c.author?.login ?? c.commit.author?.name ?? "unknown"))
+  ];
+}
+async function fetchReleaseCommits(octokit, repo, tag, logger) {
+  try {
+    const { data: tags } = await octokit.rest.repos.listTags({
+      owner: repo.owner,
+      repo: repo.repo,
+      per_page: 100
+    });
+    const tagIndex = tags.findIndex((t) => t.name === tag);
+    if (tagIndex !== -1 && tagIndex + 1 < tags.length) {
+      const prevTag = tags[tagIndex + 1].name;
+      const { data: comparison } = await octokit.rest.repos.compareCommitsWithBasehead({
+        owner: repo.owner,
+        repo: repo.repo,
+        basehead: `${prevTag}...${tag}`
+      });
+      const commits2 = comparison.commits;
+      return {
+        count: commits2.length,
+        authors: extractAuthors(commits2),
+        shas: commits2.map((c) => c.sha)
+      };
+    }
+    logger.warning(`No previous tag found before ${tag}; falling back to listing commits on ${tag}.`);
+    const { data: commits } = await octokit.rest.repos.listCommits({
+      owner: repo.owner,
+      repo: repo.repo,
+      sha: tag,
+      per_page: 100
+    });
+    return {
+      count: commits.length,
+      authors: extractAuthors(commits),
+      shas: commits.map((c) => c.sha)
+    };
+  } catch (err) {
+    logger.warning(`Could not fetch release commits: ${err.message}`);
+    return;
+  }
+}
+
+// src/context.ts
+function parseReleaseFromContext(context) {
+  const payload = context.payload ?? {};
+  const release = payload.release;
+  if (release) {
+    return {
+      release: {
+        tag: release.tag_name,
+        name: release.name || release.tag_name,
+        body: release.body || "",
+        isPrerelease: Boolean(release.prerelease),
+        isDraft: Boolean(release.draft),
+        publishedAt: release.published_at || null,
+        author: release.author ? release.author.login ?? null : null,
+        url: release.html_url || null
+      },
+      body: release.body || ""
+    };
+  }
+  const ref = payload.ref ?? context.ref ?? "";
+  const tag = ref.replace(/^refs\/tags\//, "");
+  return {
+    release: tag ? {
+      tag,
+      name: tag,
+      body: "",
+      isPrerelease: false,
+      isDraft: false,
+      publishedAt: null,
+      author: context.actor ?? null,
+      url: null
+    } : null,
+    body: ""
+  };
+}
+
 // src/checklist.ts
 var ISSUE_REFERENCE = /(#\d+)|(\/issues\/\d+)|(\/pull\/\d+)|\b[A-Z][A-Z0-9]+-\d+\b/;
 var ISSUE_REFERENCE_G = new RegExp(ISSUE_REFERENCE.source, "g");
@@ -22930,8 +23012,8 @@ var REPORT_SCHEMA_VERSION = "1.0";
 var TOOL_NAME = "automated-release-compliance-action";
 var TOOL_VERSION = "0.1.0";
 function buildComplianceReport(params) {
-  const { release, repo, evaluation, tier, generatedAt } = params;
-  return {
+  const { release, repo, evaluation, tier, generatedAt, commits } = params;
+  const report = {
     schemaVersion: REPORT_SCHEMA_VERSION,
     generatedAt,
     tool: { name: TOOL_NAME, version: TOOL_VERSION },
@@ -22956,6 +23038,14 @@ function buildComplianceReport(params) {
       }))
     }
   };
+  if (commits) {
+    report.commits = {
+      count: commits.count,
+      authors: [...commits.authors],
+      shas: [...commits.shas]
+    };
+  }
+  return report;
 }
 function serializeReport(report) {
   return `${JSON.stringify(report, null, 2)}
@@ -22963,40 +23053,6 @@ function serializeReport(report) {
 }
 
 // src/index.ts
-function parseReleaseFromContext(context2) {
-  const payload = context2.payload ?? {};
-  const release = payload.release;
-  if (release) {
-    return {
-      release: {
-        tag: release.tag_name,
-        name: release.name || release.tag_name,
-        body: release.body || "",
-        isPrerelease: Boolean(release.prerelease),
-        isDraft: Boolean(release.draft),
-        publishedAt: release.published_at || null,
-        author: release.author ? release.author.login ?? null : null,
-        url: release.html_url || null
-      },
-      body: release.body || ""
-    };
-  }
-  const ref = payload.ref ?? context2.ref ?? "";
-  const tag = ref.replace(/^refs\/tags\//, "");
-  return {
-    release: tag ? {
-      tag,
-      name: tag,
-      body: "",
-      isPrerelease: false,
-      isDraft: false,
-      publishedAt: null,
-      author: context2.actor ?? null,
-      url: null
-    } : null,
-    body: ""
-  };
-}
 async function reportFreeTier(release, evaluation, profile) {
   core.info("─".repeat(60));
   core.info(`Release compliance check — ${release.name} (${release.tag})`);
@@ -23022,13 +23078,14 @@ async function reportFreeTier(release, evaluation, profile) {
   }
 }
 var VALID_PROFILES = ["default", "iso27001", "soc2", "dora"];
-function writeComplianceReport(reportPath, release, repo, evaluation, tier) {
+function writeComplianceReport(reportPath, release, repo, evaluation, tier, commits) {
   const report = buildComplianceReport({
     release,
     repo,
     evaluation,
     tier,
-    generatedAt: new Date().toISOString()
+    generatedAt: new Date().toISOString(),
+    commits
   });
   const dir = dirname(reportPath);
   if (dir && dir !== ".") {
@@ -23064,15 +23121,28 @@ async function run() {
     core.setOutput("profile", profile);
     const tier = licenseKey ? "premium" : "free";
     core.setOutput("tier", tier);
+    const repo = context2.repo ?? { owner: "", repo: "" };
+    let commits;
+    if (context2.payload.release) {
+      const octokit = github.getOctokit(token);
+      const logger = {
+        info: (m) => core.info(m),
+        warning: (m) => core.warning(m),
+        debug: (m) => core.debug(m)
+      };
+      commits = await fetchReleaseCommits(octokit, repo, release.tag, logger);
+      if (commits) {
+        core.info(`Commit metadata: ${commits.count} commit(s) by ${commits.authors.join(", ")}`);
+      }
+    }
     if (reportPath) {
-      const repo = context2.repo ?? { owner: "", repo: "" };
-      writeComplianceReport(reportPath, release, repo, evaluation, tier);
+      writeComplianceReport(reportPath, release, repo, evaluation, tier, commits);
     }
     if (licenseKey) {
       await runPremiumAudit({
         licenseKey,
         release,
-        repo: context2.repo ?? { owner: "", repo: "" },
+        repo,
         logger: {
           info: (m) => core.info(m),
           warning: (m) => core.warning(m),
