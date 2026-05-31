@@ -22,13 +22,20 @@ inputs:
     required: false
     default: "false"
 
+  compliance-profile:
+    description: "Compliance rule profile to apply. One of: 'default', 'iso27001', 'soc2', 'dora'. Each profile extends the default checklist with industry-specific rules. Defaults to 'default'."
+    required: false
+    default: "default"
+
 outputs:
   passed:
-    description: "'true' if the release satisfied the basic compliance checklist, otherwise 'false'."
+    description: "'true' if the release satisfied the compliance checklist for the selected profile, otherwise 'false'."
   score:
-    description: "Number of checklist items passed out of the total."
+    description: "Number of checklist items passed out of the total (e.g. '4/5')."
   tier:
     description: "Which tier ran: 'free' or 'premium'."
+  profile:
+    description: "The compliance profile that was applied: 'default', 'iso27001', 'soc2', or 'dora'."
 
 runs:
   using: "node20"

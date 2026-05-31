@@ -1,13 +1,13 @@
 import { test, expect } from "bun:test";
 
-import { evaluateChecklist } from "../src/checklist.js";
+import { evaluateChecklist, getRulesForProfile, DEFAULT_RULES, ISO27001_RULES, SOC2_RULES, DORA_RULES } from "../src/checklist.js";
 import { buildAuditPayload } from "../src/premium.js";
 import { parseReleaseFromContext } from "../src/index.js";
 import type { Release, Repo } from "../src/types.js";
 
 test("checklist passes for a well-documented release", () => {
   const body =
-    "This release fixes the login regression and updates the billing flow. See #42 for details.";
+    "## What's Changed\n\nThis release fixes the login regression and updates the billing flow. See #42 for details.";
   const result = evaluateChecklist(body);
   expect(result.passed).toBe(true);
   expect(result.score).toBe(result.total);
@@ -66,6 +66,106 @@ test("parseReleaseFromContext falls back to a tag push ref", () => {
     actor: "octocat",
   });
   expect(release?.tag).toBe("v9.9.9");
+});
+
+// --- new rules ---
+
+const FULL_RELEASE_BODY = `## What's Changed
+
+This release ships the new billing module and fixes the login regression.
+See #42 and #43 for details.
+
+Security review: no security impact assessed.
+All changes were tested against the regression suite (QA sign-off: passed).
+Risk assessment: low risk — rollback via revert commit if needed.
+`.trim();
+
+test("has-changelog-section passes for a '## What's Changed' header", () => {
+  const result = evaluateChecklist(FULL_RELEASE_BODY);
+  const check = result.results.find((r) => r.id === "has-changelog-section");
+  expect(check?.ok).toBe(true);
+});
+
+test("has-changelog-section fails when no section header is present", () => {
+  const body = "This release fixes the login bug. See #10 for full context and details.";
+  const result = evaluateChecklist(body);
+  const check = result.results.find((r) => r.id === "has-changelog-section");
+  expect(check?.ok).toBe(false);
+});
+
+test("meets-min-length passes for a body >= 80 characters", () => {
+  const result = evaluateChecklist(FULL_RELEASE_BODY);
+  const check = result.results.find((r) => r.id === "meets-min-length");
+  expect(check?.ok).toBe(true);
+});
+
+test("meets-min-length fails for a short body", () => {
+  const result = evaluateChecklist("Short body. #1");
+  const check = result.results.find((r) => r.id === "meets-min-length");
+  expect(check?.ok).toBe(false);
+});
+
+// --- profile selection ---
+
+test("getRulesForProfile returns DEFAULT_RULES for 'default'", () => {
+  expect(getRulesForProfile("default")).toBe(DEFAULT_RULES);
+});
+
+test("getRulesForProfile returns ISO27001_RULES for 'iso27001'", () => {
+  expect(getRulesForProfile("iso27001")).toBe(ISO27001_RULES);
+});
+
+test("getRulesForProfile returns SOC2_RULES for 'soc2'", () => {
+  expect(getRulesForProfile("soc2")).toBe(SOC2_RULES);
+});
+
+test("getRulesForProfile returns DORA_RULES for 'dora'", () => {
+  expect(getRulesForProfile("dora")).toBe(DORA_RULES);
+});
+
+test("iso27001 profile: has-security-note passes when security review is mentioned", () => {
+  const rules = getRulesForProfile("iso27001");
+  const result = evaluateChecklist(FULL_RELEASE_BODY, {}, rules);
+  const check = result.results.find((r) => r.id === "has-security-note");
+  expect(check?.ok).toBe(true);
+});
+
+test("iso27001 profile: has-security-note fails when no security note is present", () => {
+  const body = "## What's Changed\n\nFixed the billing bug. See #5 for details. This is a sufficiently long description.";
+  const rules = getRulesForProfile("iso27001");
+  const result = evaluateChecklist(body, {}, rules);
+  const check = result.results.find((r) => r.id === "has-security-note");
+  expect(check?.ok).toBe(false);
+});
+
+test("soc2 profile: has-testing-evidence passes when QA sign-off is mentioned", () => {
+  const rules = getRulesForProfile("soc2");
+  const result = evaluateChecklist(FULL_RELEASE_BODY, {}, rules);
+  const check = result.results.find((r) => r.id === "has-testing-evidence");
+  expect(check?.ok).toBe(true);
+});
+
+test("soc2 profile: has-testing-evidence fails without testing mention", () => {
+  const body = "## What's Changed\n\nFixed the billing bug. See #5 for details. This is a sufficiently long release note.";
+  const rules = getRulesForProfile("soc2");
+  const result = evaluateChecklist(body, {}, rules);
+  const check = result.results.find((r) => r.id === "has-testing-evidence");
+  expect(check?.ok).toBe(false);
+});
+
+test("dora profile: has-risk-impact passes when rollback plan is mentioned", () => {
+  const rules = getRulesForProfile("dora");
+  const result = evaluateChecklist(FULL_RELEASE_BODY, {}, rules);
+  const check = result.results.find((r) => r.id === "has-risk-impact");
+  expect(check?.ok).toBe(true);
+});
+
+test("dora profile: has-risk-impact fails without risk assessment", () => {
+  const body = "## What's Changed\n\nFixed the billing bug. See #5 for details. This is a sufficiently long release note.";
+  const rules = getRulesForProfile("dora");
+  const result = evaluateChecklist(body, {}, rules);
+  const check = result.results.find((r) => r.id === "has-risk-impact");
+  expect(check?.ok).toBe(false);
 });
 
 test("buildAuditPayload shapes the premium request", () => {

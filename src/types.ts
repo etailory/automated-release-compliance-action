@@ -74,3 +74,5 @@ export interface ActionContext {
   ref?: string;
   repo?: Repo;
 }
+
+export type ComplianceProfile = "default" | "iso27001" | "soc2" | "dora";
