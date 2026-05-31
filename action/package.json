@@ -2,14 +2,6 @@
   "name": "governor-os-compliance-action",
   "version": "1.0.0",
   "description": "Governor OS GitHub Action — automated release compliance verification for regulated industries",
-  "main": "index.js",
-  "scripts": {
-    "start": "node index.js"
-  },
-  "dependencies": {
-    "@actions/core": "^1.10.1",
-    "@actions/github": "^6.0.0"
-  },
   "engines": {
     "node": ">=20"
   },

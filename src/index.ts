@@ -132,6 +132,7 @@ export async function run(): Promise<void> {
     const token = core.getInput("github-token", { required: true });
     const licenseKey = core.getInput("license-key");
     const failOnIncomplete = core.getBooleanInput("fail-on-incomplete");
+    const complianceProfile = core.getInput("compliance-profile") || "general";
     const reportPath = core.getInput("report-path");
 
     const context = github.context as ActionContext;
@@ -146,6 +147,8 @@ export async function run(): Promise<void> {
       core.setOutput("tier", licenseKey ? "premium" : "free");
       return;
     }
+
+    core.debug(`Compliance profile: ${complianceProfile}`);
 
     // --- Free tier: always runs, fully local. ---------------------------------
     const evaluation = evaluateChecklist(body, { release });

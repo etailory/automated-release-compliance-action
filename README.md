@@ -45,9 +45,10 @@ jobs:
   compliance:
     runs-on: ubuntu-latest
     steps:
-      - uses: markgrendev/automated-release-compliance-action@main
+      - uses: markgrendev/automated-release-compliance-action@dev
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
+          compliance-profile: iso27001
           # Write durable audit evidence and archive it as a CI artifact:
           report-path: compliance-report.json
           # license-key: ${{ secrets.GOVERNOR_LICENSE_KEY }}
@@ -79,6 +80,7 @@ a release was checked against the checklist at publish time.
 | Input | Required | Description |
 | --- | --- | --- |
 | `github-token` | yes | Token used to read release/repository context. |
+| `compliance-profile` | no | Compliance framework: `iso27001`, `soc2`, `dora`, or `general` (default). |
 | `report-path` | no | Path to write the JSON compliance report. Omit to skip. |
 | `fail-on-incomplete` | no | Fail the job if the checklist does not pass (default `false`). |
 | `license-key` | no | Enables the (stubbed) premium audit bridge. |
