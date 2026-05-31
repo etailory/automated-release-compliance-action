@@ -57,6 +57,40 @@ jobs:
           path: compliance-report.json
 ```
 
+### Compliance profiles (`compliance-profile`)
+
+Select a compliance profile to enforce industry-specific release standards. Each profile
+runs the 5 default checks plus one additional domain rule:
+
+| Profile | Extra rule added |
+| --- | --- |
+| `default` | — (5 checks) |
+| `iso27001` | Release notes acknowledge a security review or confirm no security impact (6 checks) |
+| `soc2` | Release notes include evidence of testing or QA sign-off (6 checks) |
+| `dora` | Release notes include a risk or impact assessment for operational resilience (6 checks) |
+
+```yaml
+name: ISO 27001 Release Compliance
+on:
+  release:
+    types: [published]
+
+jobs:
+  compliance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: markgrendev/automated-release-compliance-action@main
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          compliance-profile: iso27001
+          report-path: compliance-report.json
+          fail-on-incomplete: "true"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-compliance-report
+          path: compliance-report.json
+```
+
 ### Audit evidence (`report-path`)
 
 Set the optional `report-path` input to have the action write a schema-versioned,
@@ -72,18 +106,26 @@ a release was checked against the checklist at publish time.
   "tier": "free",
   "repository": "acme/widgets",
   "release": { "tag": "v1.2.0", "name": "Spring Release", "isPrerelease": false, "isDraft": false, "publishedAt": "2026-05-30T00:00:00Z", "author": "octocat", "url": "https://github.com/acme/widgets/releases/tag/v1.2.0" },
-  "compliance": { "passed": true, "score": 3, "total": 3, "checks": [ /* … */ ] }
+  "profile": "default",
+  "compliance": { "passed": true, "score": 5, "total": 5, "checks": [ /* … */ ] }
 }
 ```
 
-| Input | Required | Description |
-| --- | --- | --- |
-| `github-token` | yes | Token used to read release/repository context. |
-| `report-path` | no | Path to write the JSON compliance report. Omit to skip. |
-| `fail-on-incomplete` | no | Fail the job if the checklist does not pass (default `false`). |
-| `license-key` | no | Enables the (stubbed) premium audit bridge. |
+| Input | Required | Default | Description |
+| --- | --- | --- | --- |
+| `github-token` | yes | — | Token used to read release/repository context. |
+| `compliance-profile` | no | `default` | Compliance rule profile: `default`, `iso27001`, `soc2`, or `dora`. Each profile extends the 5-rule default checklist with one industry-specific rule. |
+| `report-path` | no | — | Path to write the JSON compliance report. Omit to skip. |
+| `fail-on-incomplete` | no | `false` | Fail the job if the checklist does not pass. |
+| `license-key` | no | — | Enables the (stubbed) premium audit bridge. |
 
-Outputs: `passed`, `score`, `tier`, and `report-path` (set when a report was written).
+| Output | Description |
+| --- | --- |
+| `passed` | `true` if the release satisfied the compliance checklist, otherwise `false`. |
+| `score` | Fraction of checks passed (e.g. `4/5`). |
+| `tier` | Which tier ran: `free` or `premium`. |
+| `profile` | The compliance profile that was applied: `default`, `iso27001`, `soc2`, or `dora`. |
+| `report-path` | Path of the written JSON compliance report (only set when `report-path` input is provided). |
 
 ## Development
 
