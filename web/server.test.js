@@ -381,21 +381,22 @@ describe('POST /api/v1/compliance/audit — success', () => {
     assert.equal(job.result.governanceVerdict.verdict, 'blocked');
   });
 
-  test('includes isoControlMapping when requested', async () => {
+  test('includes controlMapping when requested', async () => {
     const { body: post } = await req('POST', '/api/v1/compliance/audit', VALID_AUDIT_PAYLOAD, AUTH);
     const job = auditJobs.get(post.jobId);
-    assert.ok(job.result.isoControlMapping);
-    assert.ok(job.result.isoControlMapping['CC6.1']);
+    assert.ok(job.result.controlMapping, 'controlMapping must be present when isoControlMapping is requested');
+    // Default profile uses CTRL-* codes
+    assert.ok(Object.keys(job.result.controlMapping).some(k => k.startsWith('CTRL-')));
   });
 
-  test('omits isoControlMapping when not requested', async () => {
+  test('omits controlMapping when not requested', async () => {
     const payload = {
       ...VALID_AUDIT_PAYLOAD,
       requested: { ...VALID_AUDIT_PAYLOAD.requested, isoControlMapping: false },
     };
     const { body: post } = await req('POST', '/api/v1/compliance/audit', payload, AUTH);
     const job = auditJobs.get(post.jobId);
-    assert.equal(job.result.isoControlMapping, undefined);
+    assert.equal(job.result.controlMapping, undefined);
   });
 });
 
@@ -1463,6 +1464,71 @@ describe('GET /api/v1/compliance/audit/:jobId — rate limiting', () => {
     assert.ok(tooMany.length >= 1, 'Expected at least one 429 response');
     assert.equal(tooMany[0].body.success, false);
     assert.match(tooMany[0].body.error, /Too many/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/v1/compliance/audit — compliance profile and control mappings
+// ---------------------------------------------------------------------------
+
+describe('POST /api/v1/compliance/audit — profile control mappings', () => {
+  const AUTH = { Authorization: 'Bearer test-key' };
+
+  test('default profile returns CTRL-* control codes', async () => {
+    const payload = { ...VALID_AUDIT_PAYLOAD, profile: 'default', requested: { isoControlMapping: true, governanceVerdict: true } };
+    const { body: post } = await req('POST', '/api/v1/compliance/audit', payload, AUTH);
+    const job = auditJobs.get(post.jobId);
+    const mapping = job.result.controlMapping;
+    assert.ok(mapping, 'controlMapping must be present');
+    assert.ok(Object.keys(mapping).some(k => k.startsWith('CTRL-')), 'default profile must use CTRL-* codes');
+    assert.equal(job.result.profile, 'default');
+  });
+
+  test('iso27001 profile returns Annex A control codes', async () => {
+    const payload = { ...VALID_AUDIT_PAYLOAD, profile: 'iso27001', requested: { isoControlMapping: true, governanceVerdict: true } };
+    const { body: post } = await req('POST', '/api/v1/compliance/audit', payload, AUTH);
+    const job = auditJobs.get(post.jobId);
+    const mapping = job.result.controlMapping;
+    assert.ok(mapping, 'controlMapping must be present');
+    assert.ok(Object.keys(mapping).some(k => k.startsWith('A.')), 'iso27001 profile must use Annex A codes');
+    assert.equal(job.result.profile, 'iso27001');
+  });
+
+  test('soc2 profile returns CC control codes', async () => {
+    const payload = { ...VALID_AUDIT_PAYLOAD, profile: 'soc2', requested: { isoControlMapping: true, governanceVerdict: true } };
+    const { body: post } = await req('POST', '/api/v1/compliance/audit', payload, AUTH);
+    const job = auditJobs.get(post.jobId);
+    const mapping = job.result.controlMapping;
+    assert.ok(mapping, 'controlMapping must be present');
+    assert.ok(Object.keys(mapping).some(k => k.startsWith('CC')), 'soc2 profile must use CC codes');
+    assert.equal(job.result.profile, 'soc2');
+  });
+
+  test('dora profile returns Art.* control codes', async () => {
+    const payload = { ...VALID_AUDIT_PAYLOAD, profile: 'dora', requested: { isoControlMapping: true, governanceVerdict: true } };
+    const { body: post } = await req('POST', '/api/v1/compliance/audit', payload, AUTH);
+    const job = auditJobs.get(post.jobId);
+    const mapping = job.result.controlMapping;
+    assert.ok(mapping, 'controlMapping must be present');
+    assert.ok(Object.keys(mapping).some(k => k.startsWith('Art.')), 'dora profile must use Art.* codes');
+    assert.equal(job.result.profile, 'dora');
+  });
+
+  test('missing profile defaults to generic CTRL-* codes', async () => {
+    const payload = { ...VALID_AUDIT_PAYLOAD, requested: { isoControlMapping: true, governanceVerdict: true } };
+    delete payload.profile;
+    const { body: post } = await req('POST', '/api/v1/compliance/audit', payload, AUTH);
+    const job = auditJobs.get(post.jobId);
+    const mapping = job.result.controlMapping;
+    assert.ok(mapping, 'controlMapping must be present');
+    assert.ok(Object.keys(mapping).some(k => k.startsWith('CTRL-')), 'missing profile must default to CTRL-* codes');
+  });
+
+  test('controlMapping is omitted when isoControlMapping is not requested', async () => {
+    const payload = { ...VALID_AUDIT_PAYLOAD, profile: 'iso27001', requested: { isoControlMapping: false, governanceVerdict: true } };
+    const { body: post } = await req('POST', '/api/v1/compliance/audit', payload, AUTH);
+    const job = auditJobs.get(post.jobId);
+    assert.equal(job.result.controlMapping, undefined, 'controlMapping must be absent when not requested');
   });
 });
 

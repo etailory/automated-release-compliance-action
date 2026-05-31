@@ -22924,10 +22924,11 @@ function getAuditEndpoint() {
   return base ? `${base}${AUDIT_PATH}` : null;
 }
 var BACKEND_ENDPOINT = (process.env.COMPLIANCE_BACKEND_URL?.replace(/\/$/, "") ?? "https://api.example-compliance.dev") + AUDIT_PATH;
-function buildAuditPayload(release, repo) {
+function buildAuditPayload(release, repo, profile = "default") {
   return {
     schemaVersion: "1.0",
     repository: `${repo.owner}/${repo.repo}`,
+    profile,
     release: {
       tag: release.tag,
       name: release.name,
@@ -23007,6 +23008,7 @@ async function runPremiumAudit({
   licenseKey,
   release,
   repo,
+  profile = "default",
   logger
 }) {
   if (!licenseKey) {
@@ -23014,7 +23016,7 @@ async function runPremiumAudit({
   }
   const endpoint = getAuditEndpoint();
   logger.info("Premium tier detected — initiating compliance audit.");
-  const payload = buildAuditPayload(release, repo);
+  const payload = buildAuditPayload(release, repo, profile);
   logger.debug(`Prepared audit payload for ${payload.repository}@${release.tag}`);
   if (!endpoint) {
     logger.warning("COMPLIANCE_BACKEND_URL is not set — premium audit skipped. " + "Set this variable to enable backend auditing.");
@@ -23050,12 +23052,13 @@ var REPORT_SCHEMA_VERSION = "1.0";
 var TOOL_NAME = "automated-release-compliance-action";
 var TOOL_VERSION = "0.1.0";
 function buildComplianceReport(params) {
-  const { release, repo, evaluation, tier, generatedAt, commits } = params;
+  const { release, repo, evaluation, tier, profile, generatedAt, commits } = params;
   const report = {
     schemaVersion: REPORT_SCHEMA_VERSION,
     generatedAt,
     tool: { name: TOOL_NAME, version: TOOL_VERSION },
     tier,
+    profile,
     repository: `${repo.owner}/${repo.repo}`,
     release: {
       tag: release.tag,
@@ -23116,12 +23119,13 @@ async function reportFreeTier(release, evaluation, profile) {
   }
 }
 var VALID_PROFILES = ["default", "iso27001", "soc2", "dora"];
-function writeComplianceReport(reportPath, release, repo, evaluation, tier, commits) {
+function writeComplianceReport(reportPath, release, repo, evaluation, tier, commits, profile = "default") {
   const report = buildComplianceReport({
     release,
     repo,
     evaluation,
     tier,
+    profile,
     generatedAt: new Date().toISOString(),
     commits
   });
@@ -23174,13 +23178,14 @@ async function run() {
       }
     }
     if (reportPath) {
-      writeComplianceReport(reportPath, release, repo, evaluation, tier, commits);
+      writeComplianceReport(reportPath, release, repo, evaluation, tier, commits, profile);
     }
     if (licenseKey) {
       const premiumResult = await runPremiumAudit({
         licenseKey,
         release,
         repo,
+        profile,
         logger: {
           info: (m) => core.info(m),
           warning: (m) => core.warning(m),
@@ -23200,14 +23205,14 @@ async function run() {
             ],
             [verdictIcon, auditVerdict.verdict.toUpperCase(), auditVerdict.reason]
           ]);
-          const isoMapping = premiumResult.auditResult?.isoControlMapping;
-          if (isoMapping && Object.keys(isoMapping).length > 0) {
-            summaryBuilder = summaryBuilder.addHeading("ISO Control Mapping", 4).addTable([
+          const controlMapping = premiumResult.auditResult?.controlMapping ?? premiumResult.auditResult?.isoControlMapping;
+          if (controlMapping && Object.keys(controlMapping).length > 0) {
+            summaryBuilder = summaryBuilder.addHeading("Compliance Control Mapping", 4).addTable([
               [
                 { data: "Control", header: true },
                 { data: "Description", header: true }
               ],
-              ...Object.entries(isoMapping).map(([ctrl, desc]) => [ctrl, desc])
+              ...Object.entries(controlMapping).map(([ctrl, desc]) => [ctrl, desc])
             ]);
           }
           await summaryBuilder.write();

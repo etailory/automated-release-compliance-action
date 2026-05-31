@@ -16,6 +16,7 @@ import type { AuditPayload, Release, Repo, Logger } from "../src/types.js";
 const SAMPLE_PAYLOAD: AuditPayload = {
   schemaVersion: "1.0",
   repository: "acme/widgets",
+  profile: "default",
   release: {
     tag: "v1.0.0",
     name: "GA",
@@ -450,4 +451,37 @@ test("buildAuditPayload includes all required fields", () => {
   expect(payload.repository).toBe("acme/widgets");
   expect(payload.release.tag).toBe("v1.0.0");
   expect(payload.requested.isoControlMapping).toBe(true);
+  expect(payload.profile).toBe("default");
+});
+
+test("buildAuditPayload forwards the compliance profile", () => {
+  const payload = buildAuditPayload(SAMPLE_RELEASE, SAMPLE_REPO, "iso27001");
+  expect(payload.profile).toBe("iso27001");
+});
+
+test("runPremiumAudit forwards compliance profile to the payload", async () => {
+  process.env.COMPLIANCE_BACKEND_URL = "https://backend.example.com";
+
+  let capturedBody: AuditPayload | null = null;
+  globalThis.fetch = async (url: RequestInfo | URL, opts?: RequestInit) => {
+    // Only capture the POST body; the GET poll has no body
+    if (opts?.method !== 'GET' && opts?.body) {
+      capturedBody = JSON.parse(opts.body as string);
+    }
+    return new Response(JSON.stringify({ jobId: "job-profile-test", status: "complete", result: null }), {
+      status: 202,
+      headers: { "Content-Type": "application/json" },
+    });
+  };
+
+  const logger = makeLogger();
+  await runPremiumAudit({
+    licenseKey: "key-abc",
+    release: SAMPLE_RELEASE,
+    repo: SAMPLE_REPO,
+    profile: "soc2",
+    logger,
+  }).catch(() => {});
+
+  expect(capturedBody?.profile).toBe("soc2");
 });

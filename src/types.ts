@@ -46,6 +46,8 @@ export interface Logger {
 export interface AuditPayload {
   schemaVersion: string;
   repository: string;
+  /** Compliance framework the free-tier checklist was evaluated against. */
+  profile: ComplianceProfile;
   release: {
     tag: string;
     name: string;
@@ -75,12 +77,17 @@ export interface GovernanceVerdict {
 export interface AuditResult {
   auditTrailId: string;
   repository: string;
+  /** Compliance framework used for the audit. */
+  profile?: ComplianceProfile;
   release: {
     tag: string;
     publishedAt: string | null;
     author: string | null;
   };
   governanceVerdict?: GovernanceVerdict;
+  /** Profile-appropriate compliance control references (ISO 27001, SOC2, DORA, or generic). */
+  controlMapping?: Record<string, string>;
+  /** @deprecated Use controlMapping. Kept for backward compatibility with pre-v1.1 backend responses. */
   isoControlMapping?: Record<string, string>;
   evidencePdf?: { status: string; message: string };
   completedAt: string;
@@ -132,6 +139,8 @@ export interface ComplianceReport {
   };
   /** Which tier produced the evaluation. */
   tier: "free" | "premium";
+  /** Compliance framework the checklist was evaluated against. */
+  profile: ComplianceProfile;
   /** `owner/repo` the release belongs to. */
   repository: string;
   release: {

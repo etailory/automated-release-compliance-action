@@ -10,6 +10,7 @@
  */
 
 import type {
+  ComplianceProfile,
   Release,
   Repo,
   Logger,
@@ -36,10 +37,15 @@ export const BACKEND_ENDPOINT: string =
 /**
  * Build the request payload from the release context.
  */
-export function buildAuditPayload(release: Release, repo: Repo): AuditPayload {
+export function buildAuditPayload(
+  release: Release,
+  repo: Repo,
+  profile: ComplianceProfile = "default"
+): AuditPayload {
   return {
     schemaVersion: "1.0",
     repository: `${repo.owner}/${repo.repo}`,
+    profile,
     release: {
       tag: release.tag,
       name: release.name,
@@ -161,11 +167,13 @@ export async function runPremiumAudit({
   licenseKey,
   release,
   repo,
+  profile = "default",
   logger,
 }: {
   licenseKey: string;
   release: Release;
   repo: Repo;
+  profile?: ComplianceProfile;
   logger: Logger;
 }): Promise<PremiumAuditResult> {
   if (!licenseKey) {
@@ -174,7 +182,7 @@ export async function runPremiumAudit({
 
   const endpoint = getAuditEndpoint();
   logger.info("Premium tier detected — initiating compliance audit.");
-  const payload = buildAuditPayload(release, repo);
+  const payload = buildAuditPayload(release, repo, profile);
   logger.debug(`Prepared audit payload for ${payload.repository}@${release.tag}`);
 
   if (!endpoint) {

@@ -515,7 +515,7 @@ app.post('/api/v1/compliance/audit', auditLimiter, async (req, res) => {
       }
     }
 
-    const { schemaVersion, repository, release, requested } = req.body ?? {};
+    const { schemaVersion, repository, release, requested, profile } = req.body ?? {};
 
     // Input validation
     if (!schemaVersion || !repository || !release?.tag) {
@@ -538,7 +538,7 @@ app.post('/api/v1/compliance/audit', auditLimiter, async (req, res) => {
       }
     }
 
-    const auditJob = await enqueueAuditJob({ authToken: bearerToken, repository, release, requested });
+    const auditJob = await enqueueAuditJob({ authToken: bearerToken, repository, release, requested, profile });
 
     return res.status(202).json({
       success: true,
@@ -957,21 +957,62 @@ function deriveGovernanceVerdict(release) {
 }
 
 /**
+ * Return a profile-appropriate compliance control mapping.
+ *
+ * ISO 27001 uses Annex A control identifiers, SOC2 uses Trust Services Criteria
+ * (CC codes), DORA uses Article references, and the default profile uses generic
+ * CTRL codes. Using the wrong codes in an audit report would be a compliance error.
+ *
+ * @param {string} profile  One of: 'iso27001' | 'soc2' | 'dora' | 'default'
+ * @returns {Record<string, string>}
+ */
+function getControlMapping(profile) {
+  switch (profile) {
+    case 'iso27001':
+      return {
+        'A.12.1.2': 'Change management: Release tag and metadata captured and reviewed.',
+        'A.14.2.2': 'System change control: CI workflow completion linked to release.',
+        'A.14.2.8': 'System security testing: Release notes and issue references reviewed.',
+      };
+    case 'soc2':
+      return {
+        'CC6.1': 'Logical access: Release tag and metadata captured.',
+        'CC7.2': 'System monitoring: CI workflow completion linked to release.',
+        'CC8.1': 'Change management: Release notes and issue references reviewed.',
+      };
+    case 'dora':
+      return {
+        'Art.9':  'ICT risk management: Release tag and operational risk assessed.',
+        'Art.10': 'ICT incident detection: CI workflow completion and monitoring confirmed.',
+        'Art.11': 'ICT business continuity: Release notes document impact and rollback plan.',
+      };
+    default:
+      return {
+        'CTRL-1': 'Change management: Release tag and metadata captured.',
+        'CTRL-2': 'Monitoring: CI workflow completion linked to release.',
+        'CTRL-3': 'Documentation: Release notes and issue references reviewed.',
+      };
+  }
+}
+
+/**
  * Store and process an audit job in the in-memory store.
  *
- * @param {{ authToken: string, repository: string, release: object, requested: object }} params
+ * @param {{ authToken: string, repository: string, release: object, requested: object, profile?: string }} params
  * @returns {Promise<{ jobId: string }>}
  */
-async function enqueueAuditJob({ authToken, repository, release, requested }) {
+async function enqueueAuditJob({ authToken, repository, release, requested, profile }) {
   const safeRepo    = repository.replace(/[^a-zA-Z0-9-]/g, '_');
   const jobId       = `audit-${safeRepo}-${release.tag}-${Date.now()}`;
   const submittedAt = new Date().toISOString();
 
   const governance = deriveGovernanceVerdict(release);
+  const resolvedProfile = profile ?? 'default';
 
   const result = {
     auditTrailId: jobId,
     repository,
+    profile:      resolvedProfile,
     release: {
       tag:         release.tag,
       publishedAt: release.publishedAt ?? null,
@@ -980,12 +1021,8 @@ async function enqueueAuditJob({ authToken, repository, release, requested }) {
     governanceVerdict: requested?.governanceVerdict !== false
       ? governance
       : undefined,
-    isoControlMapping: requested?.isoControlMapping
-      ? {
-          'CC6.1': 'Change management: Release tag and metadata captured.',
-          'CC7.2': 'System monitoring: CI workflow completion linked to release.',
-          'CC8.1': 'Change management: Release notes and issue references reviewed.',
-        }
+    controlMapping: requested?.isoControlMapping
+      ? getControlMapping(resolvedProfile)
       : undefined,
     evidencePdf: requested?.evidencePdf
       ? { status: 'pending', message: 'PDF generation is not yet available in this tier.' }

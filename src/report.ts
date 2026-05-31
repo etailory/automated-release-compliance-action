@@ -13,6 +13,7 @@
 
 import type {
   CommitMetadata,
+  ComplianceProfile,
   ComplianceReport,
   EvaluateResult,
   Release,
@@ -42,16 +43,18 @@ export function buildComplianceReport(params: {
   repo: Repo;
   evaluation: EvaluateResult;
   tier: "free" | "premium";
+  profile: ComplianceProfile;
   generatedAt: string;
   commits?: CommitMetadata;
 }): ComplianceReport {
-  const { release, repo, evaluation, tier, generatedAt, commits } = params;
+  const { release, repo, evaluation, tier, profile, generatedAt, commits } = params;
 
   const report: ComplianceReport = {
     schemaVersion: REPORT_SCHEMA_VERSION,
     generatedAt,
     tool: { name: TOOL_NAME, version: TOOL_VERSION },
     tier,
+    profile,
     repository: `${repo.owner}/${repo.repo}`,
     release: {
       tag: release.tag,

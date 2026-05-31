@@ -249,6 +249,7 @@ run. The key fields are:
 {
   "auditTrailId": "audit-acme_widgets-v1.2.0-1748692800000",
   "repository":   "acme/widgets",
+  "profile":      "iso27001",                         // "default" | "iso27001" | "soc2" | "dora"
   "release": {
     "tag":         "v1.2.0",
     "publishedAt": "2026-05-31T12:00:00.000Z",
@@ -258,10 +259,15 @@ run. The key fields are:
     "verdict": "approved",                            // "approved" | "conditional" | "blocked"
     "reason":  "Release meets Governor OS governance requirements."
   },
-  "isoControlMapping": {
-    "CC6.1": "Change management: Release tag and metadata captured.",
-    "CC7.2": "System monitoring: CI workflow completion linked to release.",
-    "CC8.1": "Change management: Release notes and issue references reviewed."
+  "controlMapping": {
+    // Keys use the profile-appropriate control scheme:
+    //   iso27001 → ISO 27001 Annex A (A.12.1.2, A.14.2.2, ...)
+    //   soc2     → SOC2 Trust Services Criteria (CC6.1, CC7.2, ...)
+    //   dora     → DORA Articles (Art.9, Art.10, ...)
+    //   default  → Generic codes (CTRL-1, CTRL-2, ...)
+    "A.12.1.2": "Change management: Release tag and metadata captured and reviewed.",
+    "A.14.2.2": "System change control: CI workflow completion linked to release.",
+    "A.14.2.8": "System security testing: Release notes and issue references reviewed."
   },
   "completedAt": "2026-05-31T12:00:01.234Z"
 }

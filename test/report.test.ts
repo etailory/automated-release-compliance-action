@@ -30,6 +30,7 @@ test("buildComplianceReport captures release, repo, and evaluation", () => {
     repo: REPO,
     evaluation,
     tier: "free",
+    profile: "default",
     generatedAt: AT,
   });
 
@@ -37,6 +38,7 @@ test("buildComplianceReport captures release, repo, and evaluation", () => {
   expect(report.tool.name).toBe(TOOL_NAME);
   expect(report.generatedAt).toBe(AT);
   expect(report.tier).toBe("free");
+  expect(report.profile).toBe("default");
   expect(report.repository).toBe("acme/widgets");
   expect(report.release.tag).toBe("v1.2.0");
   expect(report.release.url).toBe("https://example.com/r");
@@ -52,10 +54,12 @@ test("buildComplianceReport records a failing evaluation faithfully", () => {
     repo: REPO,
     evaluation,
     tier: "premium",
+    profile: "iso27001",
     generatedAt: AT,
   });
 
   expect(report.tier).toBe("premium");
+  expect(report.profile).toBe("iso27001");
   expect(report.compliance.passed).toBe(false);
   expect(report.compliance.score).toBe(0);
   expect(report.compliance.checks.every((c) => c.ok === false)).toBe(true);
@@ -68,6 +72,7 @@ test("report snapshot is decoupled from the source evaluation", () => {
     repo: REPO,
     evaluation,
     tier: "free",
+    profile: "default",
     generatedAt: AT,
   });
 
@@ -83,6 +88,7 @@ test("serializeReport produces parseable JSON with a trailing newline", () => {
     repo: REPO,
     evaluation,
     tier: "free",
+    profile: "soc2",
     generatedAt: AT,
   });
 
@@ -103,10 +109,12 @@ test("buildComplianceReport includes commits block when provided", () => {
     repo: REPO,
     evaluation,
     tier: "free",
+    profile: "dora",
     generatedAt: AT,
     commits,
   });
 
+  expect(report.profile).toBe("dora");
   expect(report.commits).toEqual(commits);
   // Deep-copy: mutating source must not affect captured report.
   commits.authors.push("mutant");
@@ -120,6 +128,7 @@ test("buildComplianceReport omits commits block when not provided", () => {
     repo: REPO,
     evaluation,
     tier: "free",
+    profile: "default",
     generatedAt: AT,
   });
 

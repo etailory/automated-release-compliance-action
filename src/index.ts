@@ -64,13 +64,15 @@ function writeComplianceReport(
   repo: Repo,
   evaluation: EvaluateResult,
   tier: "free" | "premium",
-  commits?: CommitMetadata
+  commits?: CommitMetadata,
+  profile: ComplianceProfile = "default"
 ): void {
   const report = buildComplianceReport({
     release,
     repo,
     evaluation,
     tier,
+    profile,
     generatedAt: new Date().toISOString(),
     commits,
   });
@@ -143,7 +145,7 @@ export async function run(): Promise<void> {
 
     // --- Audit evidence: optional durable JSON report. ------------------------
     if (reportPath) {
-      writeComplianceReport(reportPath, release, repo, evaluation, tier, commits);
+      writeComplianceReport(reportPath, release, repo, evaluation, tier, commits, profile);
     }
 
     if (licenseKey) {
@@ -151,6 +153,7 @@ export async function run(): Promise<void> {
         licenseKey,
         release,
         repo,
+        profile,
         logger: {
           info: (m: string) => core.info(m),
           warning: (m: string) => core.warning(m),
@@ -181,16 +184,17 @@ export async function run(): Promise<void> {
               [verdictIcon, auditVerdict.verdict.toUpperCase(), auditVerdict.reason],
             ]);
 
-          const isoMapping = premiumResult.auditResult?.isoControlMapping;
-          if (isoMapping && Object.keys(isoMapping).length > 0) {
+          const controlMapping = premiumResult.auditResult?.controlMapping
+            ?? premiumResult.auditResult?.isoControlMapping;
+          if (controlMapping && Object.keys(controlMapping).length > 0) {
             summaryBuilder = summaryBuilder
-              .addHeading("ISO Control Mapping", 4)
+              .addHeading("Compliance Control Mapping", 4)
               .addTable([
                 [
                   { data: "Control", header: true },
                   { data: "Description", header: true },
                 ],
-                ...Object.entries(isoMapping).map(([ctrl, desc]) => [ctrl, desc]),
+                ...Object.entries(controlMapping).map(([ctrl, desc]) => [ctrl, desc]),
               ]);
           }
 
