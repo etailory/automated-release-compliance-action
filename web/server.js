@@ -686,6 +686,44 @@ app.delete('/admin/orgs/:id', async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// GET /admin/audit-jobs
+//
+// Returns a summary list of all in-memory audit jobs, sorted by submittedAt
+// descending (newest first). The full `result` payload is omitted to keep
+// the response compact for ops dashboards.
+// Protected by the ADMIN_SECRET env var.
+//
+// Response: [{ jobId, repository, tag, status, submittedAt, completedAt? }]
+// ---------------------------------------------------------------------------
+
+app.get('/admin/audit-jobs', (req, res) => {
+  if (!checkAdminAuth(req, res)) return;
+
+  const jobs = [];
+  for (const [jobId, job] of auditJobs) {
+    const summary = {
+      jobId,
+      repository:  job.repository,
+      tag:         job.tag,
+      status:      job.status,
+      submittedAt: job.submittedAt,
+    };
+    if (job.completedAt !== undefined) {
+      summary.completedAt = job.completedAt;
+    }
+    jobs.push(summary);
+  }
+
+  jobs.sort((a, b) => {
+    if (a.submittedAt < b.submittedAt) return 1;
+    if (a.submittedAt > b.submittedAt) return -1;
+    return 0;
+  });
+
+  return res.status(200).json(jobs);
+});
+
+// ---------------------------------------------------------------------------
 // 404 fallback
 // ---------------------------------------------------------------------------
 
@@ -972,9 +1010,20 @@ if (isMain) {
   // Load persisted orgs first, then overlay env-config entries (env takes precedence).
   await _loadOrgsFromFile();
   _loadOrgsFromEnv();
-  app.listen(PORT, () => {
+  const server = app.listen(PORT, () => {
     console.log(`Governor OS Web Platform running on port ${PORT}`);
   });
+
+  async function shutdown(signal) {
+    console.log(`[shutdown] Received ${signal} — stopping server gracefully.`);
+    server.close();
+    await _flushOrgsToFile();
+    console.log('[shutdown] Org registry flushed. Exiting cleanly.');
+    process.exit(0);
+  }
+
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT',  () => shutdown('SIGINT'));
 }
 
 export default app;

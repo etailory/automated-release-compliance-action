@@ -1110,6 +1110,90 @@ describe('DELETE /admin/orgs/:id', () => {
 });
 
 // ---------------------------------------------------------------------------
+// GET /admin/audit-jobs
+// ---------------------------------------------------------------------------
+
+describe('GET /admin/audit-jobs', () => {
+  const ADMIN = { Authorization: 'Bearer admin-secret' };
+  const AUTH  = { Authorization: 'Bearer test-key' };
+
+  test('returns 503 when ADMIN_SECRET is not configured', async () => {
+    const { status, body } = await req('GET', '/admin/audit-jobs', undefined, {
+      Authorization: 'Bearer any-secret',
+    });
+    assert.equal(status, 503);
+    assert.equal(body.success, false);
+  });
+
+  test('returns 401 on wrong secret', async () => {
+    process.env.ADMIN_SECRET = 'correct-admin-secret';
+    const { status, body } = await req('GET', '/admin/audit-jobs', undefined, {
+      Authorization: 'Bearer wrong-secret',
+    });
+    assert.equal(status, 401);
+    assert.equal(body.success, false);
+  });
+
+  test('returns 200 with empty array when store is empty', async () => {
+    process.env.ADMIN_SECRET = 'admin-secret';
+    const { status, body } = await req('GET', '/admin/audit-jobs', undefined, ADMIN);
+    assert.equal(status, 200);
+    assert.ok(Array.isArray(body));
+    assert.equal(body.length, 0);
+  });
+
+  test('returns job summaries after audit jobs are submitted', async () => {
+    process.env.ADMIN_SECRET = 'admin-secret';
+    await req('POST', '/api/v1/compliance/audit', VALID_AUDIT_PAYLOAD, AUTH);
+    await req('POST', '/api/v1/compliance/audit', VALID_AUDIT_PAYLOAD, AUTH);
+
+    const { status, body } = await req('GET', '/admin/audit-jobs', undefined, ADMIN);
+    assert.equal(status, 200);
+    assert.ok(Array.isArray(body));
+    assert.equal(body.length, 2);
+
+    const summary = body[0];
+    assert.ok(typeof summary.jobId      === 'string');
+    assert.ok(typeof summary.repository === 'string');
+    assert.ok(typeof summary.tag        === 'string');
+    assert.ok(typeof summary.status     === 'string');
+    assert.ok(typeof summary.submittedAt === 'string');
+    assert.equal(summary.repository, 'acme/widgets');
+    assert.equal(summary.tag, 'v1.2.0');
+    assert.equal(summary.status, 'complete');
+  });
+
+  test('does not include the full result payload in summaries', async () => {
+    process.env.ADMIN_SECRET = 'admin-secret';
+    await req('POST', '/api/v1/compliance/audit', VALID_AUDIT_PAYLOAD, AUTH);
+
+    const { body } = await req('GET', '/admin/audit-jobs', undefined, ADMIN);
+    assert.equal(body.length, 1);
+    assert.equal('result' in body[0], false, 'result payload must not appear in job summaries');
+  });
+
+  test('returns jobs sorted by submittedAt descending (newest first)', async () => {
+    process.env.ADMIN_SECRET = 'admin-secret';
+    await req('POST', '/api/v1/compliance/audit', VALID_AUDIT_PAYLOAD, AUTH);
+    await req('POST', '/api/v1/compliance/audit', VALID_AUDIT_PAYLOAD, AUTH);
+
+    const { body } = await req('GET', '/admin/audit-jobs', undefined, ADMIN);
+    assert.equal(body.length, 2);
+    // ISO strings are lexicographically comparable; newest must not be after index 0
+    assert.ok(body[0].submittedAt >= body[1].submittedAt, 'Jobs must be sorted newest first');
+  });
+
+  test('completedAt is present in summary for completed jobs', async () => {
+    process.env.ADMIN_SECRET = 'admin-secret';
+    await req('POST', '/api/v1/compliance/audit', VALID_AUDIT_PAYLOAD, AUTH);
+
+    const { body } = await req('GET', '/admin/audit-jobs', undefined, ADMIN);
+    assert.equal(body.length, 1);
+    assert.ok(typeof body[0].completedAt === 'string', 'completedAt must be present for complete jobs');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // validateLicenseKey (unit tests — no HTTP)
 // ---------------------------------------------------------------------------
 
