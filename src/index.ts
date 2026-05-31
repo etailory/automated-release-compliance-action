@@ -114,7 +114,6 @@ export async function run(): Promise<void> {
       );
       core.setOutput("passed", "false");
       core.setOutput("score", "0");
-      core.setOutput("tier", "free");
       core.setOutput("profile", profile);
       return;
     }
@@ -174,7 +173,6 @@ export async function run(): Promise<void> {
     core.setOutput("passed", String(evaluation.passed));
     core.setOutput("score", `${evaluation.score}/${evaluation.total}`);
     core.setOutput("profile", profile);
-    core.setOutput("tier", "free");
 
     // --- Optional hard gate on the free-tier checklist. -----------------------
     if (evaluation.passed) {

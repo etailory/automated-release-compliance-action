@@ -22,9 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Profile-aware failure messages** — when `fail-on-incomplete` is `true`, the failure message lists the specific rules that blocked the release for the active profile
 - **Commit metadata enrichment** — release reports include commit count, unique committer authors, and full commit SHAs sourced from the GitHub API for traceability
 - **Custom rules path** (`custom-rules-path` input) — extend any built-in profile with org-specific controls defined in a local JSON file; the path is recorded in the audit report for full traceability
-- **Action outputs**: `passed`, `score`, `tier`, `profile`, `report-path`, `integrity-hash`, `audit-verdict`
+- **Action outputs**: `passed`, `score`, `profile`, `report-path`, `integrity-hash`
 - **Free tier** local checklist evaluation with no external dependencies beyond `secrets.GITHUB_TOKEN`
-- **Premium tier** — optional `license-key` input enables authenticated dispatch to the hosted Governor OS audit backend for AI-driven ISO/SOC2/DORA governance verdicts
 - **ESLint + TypeScript linting** via `bun run lint` (replaces placeholder script)
 
 ### Changed

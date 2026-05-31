@@ -23157,7 +23157,6 @@ async function run() {
       core.warning("No release or tag found in the event payload. This action is intended to run on 'release' (published) or tag 'push' events.");
       core.setOutput("passed", "false");
       core.setOutput("score", "0");
-      core.setOutput("tier", "free");
       core.setOutput("profile", profile);
       return;
     }
@@ -23194,7 +23193,6 @@ async function run() {
     core.setOutput("passed", String(evaluation.passed));
     core.setOutput("score", `${evaluation.score}/${evaluation.total}`);
     core.setOutput("profile", profile);
-    core.setOutput("tier", "free");
     if (evaluation.passed) {
       core.info(`✅ All ${evaluation.score}/${evaluation.total} compliance checks passed (profile: ${profile})`);
     } else if (failOnIncomplete) {
