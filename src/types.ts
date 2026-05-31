@@ -47,64 +47,6 @@ export interface Logger {
   debug: (message: string) => void;
 }
 
-export interface AuditPayload {
-  schemaVersion: string;
-  repository: string;
-  /** Compliance framework the free-tier checklist was evaluated against. */
-  profile: ComplianceProfile;
-  release: {
-    tag: string;
-    name: string;
-    isPrerelease: boolean;
-    isDraft: boolean;
-    publishedAt: string | null;
-    author: string | null;
-  };
-  requested: {
-    isoControlMapping: boolean;
-    evidencePdf: boolean;
-    governanceVerdict: boolean;
-  };
-}
-
-export interface DispatchResult {
-  status: string;
-  queued: boolean;
-  jobId?: string;
-}
-
-export interface GovernanceVerdict {
-  verdict: "approved" | "conditional" | "blocked";
-  reason: string;
-}
-
-export interface AuditResult {
-  auditTrailId: string;
-  repository: string;
-  /** Compliance framework used for the audit. */
-  profile?: ComplianceProfile;
-  release: {
-    tag: string;
-    publishedAt: string | null;
-    author: string | null;
-  };
-  governanceVerdict?: GovernanceVerdict;
-  /** Profile-appropriate compliance control references (ISO 27001, SOC2, DORA, or generic). */
-  controlMapping?: Record<string, string>;
-  /** @deprecated Use controlMapping. Kept for backward compatibility with pre-v1.1 backend responses. */
-  isoControlMapping?: Record<string, string>;
-  evidencePdf?: { status: string; message: string };
-  completedAt: string;
-}
-
-export interface PremiumAuditResult {
-  prepared: boolean;
-  endpoint: string;
-  payload: AuditPayload;
-  jobId?: string;
-  auditResult?: AuditResult;
-}
-
 export interface ActionContext {
   payload: Record<string, unknown>;
   actor?: string;

@@ -1,7 +1,6 @@
 import { test, expect } from "bun:test";
 
 import { evaluateChecklist, getRulesForProfile, DEFAULT_RULES, ISO27001_RULES, SOC2_RULES, DORA_RULES } from "../src/checklist.js";
-import { buildAuditPayload } from "../src/premium.js";
 import { buildComplianceReport } from "../src/report.js";
 import { parseReleaseFromContext } from "../src/context.js";
 import type { Release, Repo } from "../src/types.js";
@@ -285,20 +284,3 @@ test("controlRef is included in compliance report checks", () => {
   expect(check?.controlRef).toBe("CTRL-1");
 });
 
-test("buildAuditPayload shapes the premium request", () => {
-  const release: Release = {
-    tag: "v1.0.0",
-    name: "GA",
-    body: "",
-    isPrerelease: false,
-    isDraft: false,
-    publishedAt: null,
-    author: "a",
-    url: null,
-  };
-  const repo: Repo = { owner: "acme", repo: "widgets" };
-  const payload = buildAuditPayload(release, repo);
-  expect(payload.repository).toBe("acme/widgets");
-  expect(payload.release.tag).toBe("v1.0.0");
-  expect(payload.requested.isoControlMapping).toBe(true);
-});

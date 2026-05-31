@@ -12,11 +12,6 @@ inputs:
     required: true
     default: ${{ github.token }}
 
-  license-key:
-    description: "Optional premium license key. When provided, the action prepares the secure bridge to the hosted AI compliance audit backend. When omitted, only the free local checklist runs."
-    required: false
-    default: ""
-
   fail-on-incomplete:
     description: "If 'true', the action fails the workflow when the free-tier checklist does not pass. Defaults to 'false' (warn-only)."
     required: false
@@ -32,19 +27,20 @@ inputs:
     required: false
     default: ""
 
+  custom-rules-path:
+    description: "Optional path to a JSON file containing additional compliance rules to merge with the selected profile. Enables org-specific controls beyond the built-in checklist."
+    required: false
+    default: ""
+
 outputs:
   passed:
     description: "'true' if the release satisfied the compliance checklist for the selected profile, otherwise 'false'."
   score:
     description: "Number of checklist items passed out of the total (e.g. '4/5')."
-  tier:
-    description: "Which tier ran: 'free' or 'premium'."
   profile:
     description: "The compliance profile that was applied: 'default', 'iso27001', 'soc2', or 'dora'."
   report-path:
     description: "Path of the written JSON compliance report, if 'report-path' was provided."
-  audit-verdict:
-    description: "The governance verdict from the premium audit backend: 'approved', 'conditional', or 'blocked'. Only set when a premium license key is provided and the audit backend returns a governance verdict."
   integrity-hash:
     description: "SHA-256 hex digest of the compliance report artifact. Only set when 'report-path' is provided."
 

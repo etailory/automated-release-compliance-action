@@ -8,7 +8,6 @@ import { fetchReleaseCommits } from "./commits.js";
 import { parseReleaseFromContext } from "./context.js";
 import { evaluateChecklist, getRulesForProfile } from "./checklist.js";
 import { loadCustomRules } from "./custom-rules.js";
-import { runPremiumAudit } from "./premium.js";
 import { buildComplianceReport, computeReportHash, serializeReport } from "./report.js";
 import { buildJobSummary } from "./summary.js";
 import { buildFailureMessage } from "./messages.js";
@@ -22,7 +21,6 @@ async function reportFreeTier(
   release: Release,
   evaluation: EvaluateResult,
   profile: ComplianceProfile,
-  tier: "free" | "premium",
   generatedAt: string,
   reportPath?: string,
   integrityHash?: string
@@ -39,7 +37,7 @@ async function reportFreeTier(
 
   try {
     await buildJobSummary(
-      { repo, release, evaluation, profile, tier, generatedAt, reportPath, integrityHash },
+      { repo, release, evaluation, profile, tier: "free", generatedAt, reportPath, integrityHash },
       core.summary
     );
   } catch (err) {
@@ -62,7 +60,6 @@ function writeComplianceReport(
   release: Release,
   repo: Repo,
   evaluation: EvaluateResult,
-  tier: "free" | "premium",
   generatedAt: string,
   commits?: CommitMetadata,
   profile: ComplianceProfile = "default",
@@ -72,7 +69,7 @@ function writeComplianceReport(
     release,
     repo,
     evaluation,
-    tier,
+    tier: "free",
     profile,
     generatedAt,
     commits,
@@ -95,7 +92,6 @@ function writeComplianceReport(
 export async function run(): Promise<void> {
   try {
     const token = core.getInput("github-token", { required: true });
-    const licenseKey = core.getInput("license-key");
     const failOnIncomplete = core.getBooleanInput("fail-on-incomplete");
     const rawProfile = core.getInput("compliance-profile").trim().toLowerCase();
     if (rawProfile && !(VALID_PROFILES as string[]).includes(rawProfile)) {
@@ -118,14 +114,13 @@ export async function run(): Promise<void> {
       );
       core.setOutput("passed", "false");
       core.setOutput("score", "0");
-      core.setOutput("tier", licenseKey ? "premium" : "free");
+      core.setOutput("tier", "free");
       core.setOutput("profile", profile);
       return;
     }
 
     // --- Free tier: always runs, fully local. ---------------------------------
     const repo = context.repo ?? { owner: "", repo: "" };
-    const tier = licenseKey ? "premium" : "free";
     const customRulesPath = core.getInput("custom-rules-path").trim();
     const profileRules = getRulesForProfile(profile);
     let rules = profileRules;
@@ -160,7 +155,7 @@ export async function run(): Promise<void> {
     let integrityHash: string | undefined;
     if (reportPath) {
       integrityHash = writeComplianceReport(
-        reportPath, release, repo, evaluation, tier, generatedAt, commits, profile,
+        reportPath, release, repo, evaluation, generatedAt, commits, profile,
         customRulesPath || undefined
       );
       core.setOutput("integrity-hash", integrityHash);
@@ -171,7 +166,6 @@ export async function run(): Promise<void> {
       release,
       evaluation,
       profile,
-      tier,
       generatedAt,
       reportPath || undefined,
       integrityHash
@@ -180,72 +174,7 @@ export async function run(): Promise<void> {
     core.setOutput("passed", String(evaluation.passed));
     core.setOutput("score", `${evaluation.score}/${evaluation.total}`);
     core.setOutput("profile", profile);
-
-    // --- Premium gate: only when a license key is present. --------------------
-    core.setOutput("tier", tier);
-
-    if (licenseKey) {
-      const premiumResult = await runPremiumAudit({
-        licenseKey,
-        release,
-        repo,
-        profile,
-        logger: {
-          info: (m: string) => core.info(m),
-          warning: (m: string) => core.warning(m),
-          debug: (m: string) => core.debug(m),
-        },
-      });
-
-      const auditVerdict = premiumResult.auditResult?.governanceVerdict;
-      if (auditVerdict) {
-        core.setOutput("audit-verdict", auditVerdict.verdict);
-
-        const verdictIcon =
-          auditVerdict.verdict === "approved"
-            ? "✅"
-            : auditVerdict.verdict === "conditional"
-            ? "⚠️"
-            : "❌";
-
-        try {
-          let summaryBuilder = core.summary
-            .addHeading("Premium Compliance Audit — Governance Verdict", 3)
-            .addTable([
-              [
-                { data: "Status", header: true },
-                { data: "Verdict", header: true },
-                { data: "Reason", header: true },
-              ],
-              [verdictIcon, auditVerdict.verdict.toUpperCase(), auditVerdict.reason],
-            ]);
-
-          const controlMapping = premiumResult.auditResult?.controlMapping
-            ?? premiumResult.auditResult?.isoControlMapping;
-          if (controlMapping && Object.keys(controlMapping).length > 0) {
-            summaryBuilder = summaryBuilder
-              .addHeading("Compliance Control Mapping", 4)
-              .addTable([
-                [
-                  { data: "Control", header: true },
-                  { data: "Description", header: true },
-                ],
-                ...Object.entries(controlMapping).map(([ctrl, desc]) => [ctrl, desc]),
-              ]);
-          }
-
-          await summaryBuilder.write();
-        } catch (err) {
-          core.debug(
-            `Could not write premium verdict to summary: ${(err as Error).message}`
-          );
-        }
-      }
-    } else {
-      core.info(
-        "No license key provided — running free tier only. Add a 'license-key' input to enable premium AI compliance auditing."
-      );
-    }
+    core.setOutput("tier", "free");
 
     // --- Optional hard gate on the free-tier checklist. -----------------------
     if (evaluation.passed) {

@@ -12477,7 +12477,7 @@ var require_fetch = __commonJS((exports, module) => {
       this.emit("terminated", error);
     }
   }
-  function fetch2(input, init = {}) {
+  function fetch(input, init = {}) {
     webidl.argumentLengthCheck(arguments, 1, { header: "globalThis.fetch" });
     const p = createDeferredPromise();
     let requestObject;
@@ -13334,7 +13334,7 @@ var require_fetch = __commonJS((exports, module) => {
     }
   }
   module.exports = {
-    fetch: fetch2,
+    fetch,
     Fetch,
     fetching,
     finalizeAndReportTiming
@@ -16374,7 +16374,7 @@ var require_undici = __commonJS((exports, module) => {
   exports.getGlobalDispatcher = getGlobalDispatcher;
   if (util.nodeMajor > 16 || util.nodeMajor === 16 && util.nodeMinor >= 8) {
     let fetchImpl = null;
-    exports.fetch = async function fetch2(resource) {
+    exports.fetch = async function fetch(resource) {
       if (!fetchImpl) {
         fetchImpl = require_fetch().fetch;
       }
@@ -19627,14 +19627,14 @@ var require_dist_node5 = __commonJS((exports, module) => {
     let headers = {};
     let status;
     let url;
-    let { fetch: fetch2 } = globalThis;
+    let { fetch } = globalThis;
     if ((_b = requestOptions.request) == null ? undefined : _b.fetch) {
-      fetch2 = requestOptions.request.fetch;
+      fetch = requestOptions.request.fetch;
     }
-    if (!fetch2) {
+    if (!fetch) {
       throw new Error("fetch is not set. Please pass a fetch implementation as new Octokit({ request: { fetch }}). Learn more at https://github.com/octokit/octokit.js/#fetch-missing");
     }
-    return fetch2(requestOptions.url, {
+    return fetch(requestOptions.url, {
       method: requestOptions.method,
       body: requestOptions.body,
       redirect: (_c = requestOptions.request) == null ? undefined : _c.redirect,
@@ -22980,137 +22980,6 @@ function loadCustomRules(filePath) {
   });
 }
 
-// src/premium.ts
-var AUDIT_PATH = "/api/v1/compliance/audit";
-var DEFAULT_TIMEOUT_MS = 1e4;
-function getAuditEndpoint() {
-  const base = process.env.COMPLIANCE_BACKEND_URL?.replace(/\/$/, "");
-  return base ? `${base}${AUDIT_PATH}` : null;
-}
-var BACKEND_ENDPOINT = (process.env.COMPLIANCE_BACKEND_URL?.replace(/\/$/, "") ?? "https://api.example-compliance.dev") + AUDIT_PATH;
-function buildAuditPayload(release, repo, profile = "default") {
-  return {
-    schemaVersion: "1.0",
-    repository: `${repo.owner}/${repo.repo}`,
-    profile,
-    release: {
-      tag: release.tag,
-      name: release.name,
-      isPrerelease: release.isPrerelease,
-      isDraft: release.isDraft,
-      publishedAt: release.publishedAt,
-      author: release.author
-    },
-    requested: {
-      isoControlMapping: true,
-      evidencePdf: true,
-      governanceVerdict: true
-    }
-  };
-}
-async function dispatchToBackend(licenseKey, payload) {
-  const base = process.env.COMPLIANCE_BACKEND_URL?.replace(/\/$/, "");
-  if (!base) {
-    return { status: "stubbed", queued: false };
-  }
-  const endpoint = `${base}${AUDIT_PATH}`;
-  const timeoutMs = Number(process.env.COMPLIANCE_REQUEST_TIMEOUT_MS ?? DEFAULT_TIMEOUT_MS);
-  const controller = new AbortController;
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const response = await fetch(endpoint, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${licenseKey}`
-      },
-      body: JSON.stringify(payload),
-      signal: controller.signal
-    });
-    if (response.status === 202) {
-      const data = await response.json();
-      return { status: "queued", queued: true, jobId: data.jobId };
-    }
-    let detail;
-    try {
-      detail = await response.text();
-    } catch {
-      detail = "(unreadable response body)";
-    }
-    throw new Error(`Compliance backend returned HTTP ${response.status}: ${detail}`);
-  } finally {
-    clearTimeout(timer);
-  }
-}
-async function fetchAuditResult(licenseKey, jobId) {
-  const base = process.env.COMPLIANCE_BACKEND_URL?.replace(/\/$/, "");
-  if (!base)
-    return null;
-  const endpoint = `${base}${AUDIT_PATH}/${jobId}`;
-  const timeoutMs = Number(process.env.COMPLIANCE_REQUEST_TIMEOUT_MS ?? DEFAULT_TIMEOUT_MS);
-  for (let attempt = 0;attempt < 2; attempt++) {
-    const controller = new AbortController;
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    try {
-      const response = await fetch(endpoint, {
-        method: "GET",
-        headers: { Authorization: `Bearer ${licenseKey}` },
-        signal: controller.signal
-      });
-      if (!response.ok)
-        return null;
-      const data = await response.json();
-      if (data.status === "complete" && data.result)
-        return data.result;
-    } finally {
-      clearTimeout(timer);
-    }
-  }
-  return null;
-}
-async function runPremiumAudit({
-  licenseKey,
-  release,
-  repo,
-  profile = "default",
-  logger
-}) {
-  if (!licenseKey) {
-    throw new Error("runPremiumAudit called without a license key");
-  }
-  const endpoint = getAuditEndpoint();
-  logger.info("Premium tier detected — initiating compliance audit.");
-  const payload = buildAuditPayload(release, repo, profile);
-  logger.debug(`Prepared audit payload for ${payload.repository}@${release.tag}`);
-  if (!endpoint) {
-    logger.warning("COMPLIANCE_BACKEND_URL is not set — premium audit skipped. " + "Set this variable to enable backend auditing.");
-    return {
-      prepared: true,
-      endpoint: "https://api.example-compliance.dev" + AUDIT_PATH,
-      payload
-    };
-  }
-  logger.info(`Dispatching audit to ${endpoint}`);
-  const result = await dispatchToBackend(licenseKey, payload);
-  logger.info(`Backend dispatch result: ${result.status}.`);
-  if (!result.jobId) {
-    return { prepared: true, endpoint, payload };
-  }
-  logger.info(`Compliance audit job queued: jobId=${result.jobId}`);
-  let auditResult;
-  try {
-    const fetched = await fetchAuditResult(licenseKey, result.jobId);
-    if (fetched) {
-      auditResult = fetched;
-      const verdict = fetched.governanceVerdict?.verdict ?? "unknown";
-      logger.info(`Governance verdict: ${verdict}`);
-    }
-  } catch (err) {
-    logger.warning(`Could not retrieve audit result for jobId=${result.jobId}: ${err.message}`);
-  }
-  return { prepared: true, endpoint, payload, jobId: result.jobId, auditResult };
-}
-
 // src/report.ts
 import { createHash } from "node:crypto";
 var REPORT_SCHEMA_VERSION = "1.0";
@@ -23234,7 +23103,7 @@ function buildFailureMessage(profile, evaluation) {
 }
 
 // src/index.ts
-async function reportFreeTier(repo, release, evaluation, profile, tier, generatedAt, reportPath, integrityHash) {
+async function reportFreeTier(repo, release, evaluation, profile, generatedAt, reportPath, integrityHash) {
   core.info("─".repeat(60));
   core.info(`Release compliance check — ${release.name} (${release.tag})`);
   core.info(`Profile: ${profile} | Result: ${evaluation.score}/${evaluation.total} checks passed`);
@@ -23244,18 +23113,18 @@ async function reportFreeTier(repo, release, evaluation, profile, tier, generate
   }
   core.info("─".repeat(60));
   try {
-    await buildJobSummary({ repo, release, evaluation, profile, tier, generatedAt, reportPath, integrityHash }, core.summary);
+    await buildJobSummary({ repo, release, evaluation, profile, tier: "free", generatedAt, reportPath, integrityHash }, core.summary);
   } catch (err) {
     core.debug(`Could not write job summary: ${err.message}`);
   }
 }
 var VALID_PROFILES = ["default", "iso27001", "soc2", "dora"];
-function writeComplianceReport(reportPath, release, repo, evaluation, tier, generatedAt, commits, profile = "default", customRulesPath) {
+function writeComplianceReport(reportPath, release, repo, evaluation, generatedAt, commits, profile = "default", customRulesPath) {
   const report = buildComplianceReport({
     release,
     repo,
     evaluation,
-    tier,
+    tier: "free",
     profile,
     generatedAt,
     commits,
@@ -23274,7 +23143,6 @@ function writeComplianceReport(reportPath, release, repo, evaluation, tier, gene
 async function run() {
   try {
     const token = core.getInput("github-token", { required: true });
-    const licenseKey = core.getInput("license-key");
     const failOnIncomplete = core.getBooleanInput("fail-on-incomplete");
     const rawProfile = core.getInput("compliance-profile").trim().toLowerCase();
     if (rawProfile && !VALID_PROFILES.includes(rawProfile)) {
@@ -23289,12 +23157,11 @@ async function run() {
       core.warning("No release or tag found in the event payload. This action is intended to run on 'release' (published) or tag 'push' events.");
       core.setOutput("passed", "false");
       core.setOutput("score", "0");
-      core.setOutput("tier", licenseKey ? "premium" : "free");
+      core.setOutput("tier", "free");
       core.setOutput("profile", profile);
       return;
     }
     const repo = context2.repo ?? { owner: "", repo: "" };
-    const tier = licenseKey ? "premium" : "free";
     const customRulesPath = core.getInput("custom-rules-path").trim();
     const profileRules = getRulesForProfile(profile);
     let rules = profileRules;
@@ -23320,57 +23187,14 @@ async function run() {
     }
     let integrityHash;
     if (reportPath) {
-      integrityHash = writeComplianceReport(reportPath, release, repo, evaluation, tier, generatedAt, commits, profile, customRulesPath || undefined);
+      integrityHash = writeComplianceReport(reportPath, release, repo, evaluation, generatedAt, commits, profile, customRulesPath || undefined);
       core.setOutput("integrity-hash", integrityHash);
     }
-    await reportFreeTier(repo, release, evaluation, profile, tier, generatedAt, reportPath || undefined, integrityHash);
+    await reportFreeTier(repo, release, evaluation, profile, generatedAt, reportPath || undefined, integrityHash);
     core.setOutput("passed", String(evaluation.passed));
     core.setOutput("score", `${evaluation.score}/${evaluation.total}`);
     core.setOutput("profile", profile);
-    core.setOutput("tier", tier);
-    if (licenseKey) {
-      const premiumResult = await runPremiumAudit({
-        licenseKey,
-        release,
-        repo,
-        profile,
-        logger: {
-          info: (m) => core.info(m),
-          warning: (m) => core.warning(m),
-          debug: (m) => core.debug(m)
-        }
-      });
-      const auditVerdict = premiumResult.auditResult?.governanceVerdict;
-      if (auditVerdict) {
-        core.setOutput("audit-verdict", auditVerdict.verdict);
-        const verdictIcon = auditVerdict.verdict === "approved" ? "✅" : auditVerdict.verdict === "conditional" ? "⚠️" : "❌";
-        try {
-          let summaryBuilder = core.summary.addHeading("Premium Compliance Audit — Governance Verdict", 3).addTable([
-            [
-              { data: "Status", header: true },
-              { data: "Verdict", header: true },
-              { data: "Reason", header: true }
-            ],
-            [verdictIcon, auditVerdict.verdict.toUpperCase(), auditVerdict.reason]
-          ]);
-          const controlMapping = premiumResult.auditResult?.controlMapping ?? premiumResult.auditResult?.isoControlMapping;
-          if (controlMapping && Object.keys(controlMapping).length > 0) {
-            summaryBuilder = summaryBuilder.addHeading("Compliance Control Mapping", 4).addTable([
-              [
-                { data: "Control", header: true },
-                { data: "Description", header: true }
-              ],
-              ...Object.entries(controlMapping).map(([ctrl, desc]) => [ctrl, desc])
-            ]);
-          }
-          await summaryBuilder.write();
-        } catch (err) {
-          core.debug(`Could not write premium verdict to summary: ${err.message}`);
-        }
-      }
-    } else {
-      core.info("No license key provided — running free tier only. Add a 'license-key' input to enable premium AI compliance auditing.");
-    }
+    core.setOutput("tier", "free");
     if (evaluation.passed) {
       core.info(`✅ All ${evaluation.score}/${evaluation.total} compliance checks passed (profile: ${profile})`);
     } else if (failOnIncomplete) {
