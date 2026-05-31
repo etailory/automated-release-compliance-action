@@ -22,6 +22,11 @@ inputs:
     required: false
     default: "false"
 
+  report-path:
+    description: "Optional path to write a machine-readable JSON compliance report (audit evidence). When set, a schema-versioned report is written and can be archived as a CI artifact. When omitted, no file is written."
+    required: false
+    default: ""
+
 outputs:
   passed:
     description: "'true' if the release satisfied the basic compliance checklist, otherwise 'false'."
@@ -29,6 +34,8 @@ outputs:
     description: "Number of checklist items passed out of the total."
   tier:
     description: "Which tier ran: 'free' or 'premium'."
+  report-path:
+    description: "Path of the written JSON compliance report, if 'report-path' was provided."
 
 runs:
   using: "node20"

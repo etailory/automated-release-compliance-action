@@ -1,9 +1,13 @@
+import { mkdirSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
+
 import * as core from "@actions/core";
 import * as github from "@actions/github";
 
 import { evaluateChecklist } from "./checklist.js";
 import { runPremiumAudit } from "./premium.js";
-import type { Release, EvaluateResult, ActionContext } from "./types.js";
+import { buildComplianceReport, serializeReport } from "./report.js";
+import type { Release, Repo, EvaluateResult, ActionContext } from "./types.js";
 
 /**
  * Pull a normalized release object out of the event payload.
@@ -92,11 +96,43 @@ async function reportFreeTier(
   }
 }
 
+/**
+ * Write a durable, machine-readable compliance report to disk so it can be
+ * archived as audit evidence (e.g. a CI artifact). Because the user explicitly
+ * requested a report path, an I/O failure here is treated as a hard failure
+ * rather than swallowed.
+ */
+function writeComplianceReport(
+  reportPath: string,
+  release: Release,
+  repo: Repo,
+  evaluation: EvaluateResult,
+  tier: "free" | "premium"
+): void {
+  const report = buildComplianceReport({
+    release,
+    repo,
+    evaluation,
+    tier,
+    generatedAt: new Date().toISOString(),
+  });
+
+  const dir = dirname(reportPath);
+  if (dir && dir !== ".") {
+    mkdirSync(dir, { recursive: true });
+  }
+  writeFileSync(reportPath, serializeReport(report), "utf8");
+
+  core.info(`Wrote compliance report to ${reportPath}`);
+  core.setOutput("report-path", reportPath);
+}
+
 export async function run(): Promise<void> {
   try {
     const token = core.getInput("github-token", { required: true });
     const licenseKey = core.getInput("license-key");
     const failOnIncomplete = core.getBooleanInput("fail-on-incomplete");
+    const reportPath = core.getInput("report-path");
 
     const context = github.context as ActionContext;
     const { release, body } = parseReleaseFromContext(context);
@@ -121,6 +157,12 @@ export async function run(): Promise<void> {
     // --- Premium gate: only when a license key is present. --------------------
     const tier = licenseKey ? "premium" : "free";
     core.setOutput("tier", tier);
+
+    // --- Audit evidence: optional durable JSON report. ------------------------
+    if (reportPath) {
+      const repo = context.repo ?? { owner: "", repo: "" };
+      writeComplianceReport(reportPath, release, repo, evaluation, tier);
+    }
 
     if (licenseKey) {
       // `token` will be used by the future backend bridge to enrich the audit.
