@@ -282,16 +282,23 @@ async function _findJobInAuditLog(jobId) {
 }
 
 /**
- * Scan the NDJSON audit log, filter by org, sort newest-first, and slice.
+ * Scan the NDJSON audit log, filter by org and optionally by repository,
+ * sort newest-first, and page.
  *
  * When orgId is non-null the result is restricted to jobs whose repository
  * owner matches orgId. When orgId is null (single-tenant LICENSE_SECRET mode)
  * all records are returned.
  *
- * @param {{ orgId: string|null, limit: number }} opts
- * @returns {Promise<object[]>}
+ * When repository is non-null only records with an exact repository match
+ * are returned (applied after the orgId filter).
+ *
+ * Returns { records, total } where total is the count of all matched records
+ * before pagination, and records is the sliced page.
+ *
+ * @param {{ orgId: string|null, limit: number, offset?: number, repository?: string|null }} opts
+ * @returns {Promise<{ records: object[], total: number }>}
  */
-export async function _findJobsInAuditLog({ orgId, limit }) {
+export async function _findJobsInAuditLog({ orgId, limit, offset = 0, repository = null }) {
   const filePath = getAuditLogFilePath();
   const records = [];
   try {
@@ -304,6 +311,7 @@ export async function _findJobsInAuditLog({ orgId, limit }) {
           const owner = (record.repository ?? '').split('/')[0];
           if (owner !== orgId) continue;
         }
+        if (repository !== null && record.repository !== repository) continue;
         records.push(record);
       } catch { /* skip malformed lines */ }
     }
@@ -319,7 +327,8 @@ export async function _findJobsInAuditLog({ orgId, limit }) {
     if (ta > tb) return -1;
     return 0;
   });
-  return records.slice(0, limit);
+  const total = records.length;
+  return { records: records.slice(offset, offset + limit), total };
 }
 
 // ---------------------------------------------------------------------------
@@ -758,15 +767,39 @@ app.get('/api/v1/compliance/audits', listAuditsLimiter, async (req, res) => {
       limit = Math.min(parsed, MAX_LIMIT);
     }
 
+    // Parse ?offset
+    let offset = 0;
+    if (req.query.offset !== undefined) {
+      const parsed = Number(req.query.offset);
+      if (!Number.isInteger(parsed) || parsed < 0) {
+        return res.status(400).json({
+          success: false,
+          error:   'Invalid offset: must be a non-negative integer.',
+        });
+      }
+      offset = parsed;
+    }
+
+    // Parse ?repository (optional exact-match filter)
+    const repository = (typeof req.query.repository === 'string' && req.query.repository)
+      ? req.query.repository
+      : null;
+
     // Determine org scope for filtering
     const orgId = (isRegistryEnforced() && authResult?.orgId) ? authResult.orgId : null;
 
-    const jobs = await _findJobsInAuditLog({ orgId, limit });
+    const { records: jobs, total } = await _findJobsInAuditLog({ orgId, limit, offset, repository });
 
     return res.status(200).json({
       success: true,
       count:   jobs.length,
       jobs,
+      pagination: {
+        total,
+        limit,
+        offset,
+        hasMore: offset + jobs.length < total,
+      },
     });
 
   } catch (error) {

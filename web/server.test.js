@@ -1773,6 +1773,118 @@ describe('GET /api/v1/compliance/audits — pagination', () => {
 });
 
 // ---------------------------------------------------------------------------
+// GET /api/v1/compliance/audits — repository filter, offset, pagination object
+// ---------------------------------------------------------------------------
+
+describe('GET /api/v1/compliance/audits — filtering and pagination', () => {
+  const AUTH = { Authorization: 'Bearer test-key' };
+
+  test('?repository filter returns only matching jobs', async () => {
+    const p1 = { ...VALID_AUDIT_PAYLOAD, repository: 'acme/widgets' };
+    const p2 = { ...VALID_AUDIT_PAYLOAD, repository: 'acme/other-repo' };
+    await req('POST', '/api/v1/compliance/audit', p1, AUTH);
+    await req('POST', '/api/v1/compliance/audit', p2, AUTH);
+
+    const { status, body } = await req('GET', '/api/v1/compliance/audits?repository=acme%2Fwidgets', undefined, AUTH);
+    assert.equal(status, 200);
+    assert.equal(body.jobs.length, 1);
+    assert.equal(body.jobs[0].repository, 'acme/widgets');
+  });
+
+  test('?repository filter returns empty list when no jobs match', async () => {
+    await req('POST', '/api/v1/compliance/audit', VALID_AUDIT_PAYLOAD, AUTH);
+    const { status, body } = await req('GET', '/api/v1/compliance/audits?repository=no-match%2Frepo', undefined, AUTH);
+    assert.equal(status, 200);
+    assert.equal(body.jobs.length, 0);
+    assert.equal(body.count, 0);
+  });
+
+  test('?offset skips the specified number of records', async () => {
+    for (let i = 0; i < 3; i++) {
+      const p = { ...VALID_AUDIT_PAYLOAD, release: { ...VALID_AUDIT_PAYLOAD.release, tag: `v1.0.${i}` } };
+      await req('POST', '/api/v1/compliance/audit', p, AUTH);
+    }
+    const { status, body } = await req('GET', '/api/v1/compliance/audits?offset=1', undefined, AUTH);
+    assert.equal(status, 200);
+    assert.equal(body.jobs.length, 2);
+  });
+
+  test('?offset=0 is equivalent to no offset', async () => {
+    await req('POST', '/api/v1/compliance/audit', VALID_AUDIT_PAYLOAD, AUTH);
+    const { status, body } = await req('GET', '/api/v1/compliance/audits?offset=0', undefined, AUTH);
+    assert.equal(status, 200);
+    assert.equal(body.jobs.length, 1);
+  });
+
+  test('?offset=-1 returns 400', async () => {
+    const { status, body } = await req('GET', '/api/v1/compliance/audits?offset=-1', undefined, AUTH);
+    assert.equal(status, 400);
+    assert.equal(body.success, false);
+    assert.match(body.error, /offset/);
+  });
+
+  test('?offset=foo returns 400', async () => {
+    const { status, body } = await req('GET', '/api/v1/compliance/audits?offset=foo', undefined, AUTH);
+    assert.equal(status, 400);
+    assert.equal(body.success, false);
+    assert.match(body.error, /offset/);
+  });
+
+  test('?offset=1.5 returns 400', async () => {
+    const { status, body } = await req('GET', '/api/v1/compliance/audits?offset=1.5', undefined, AUTH);
+    assert.equal(status, 400);
+    assert.equal(body.success, false);
+  });
+
+  test('response includes pagination object with correct fields', async () => {
+    for (let i = 0; i < 3; i++) {
+      const p = { ...VALID_AUDIT_PAYLOAD, release: { ...VALID_AUDIT_PAYLOAD.release, tag: `v1.0.${i}` } };
+      await req('POST', '/api/v1/compliance/audit', p, AUTH);
+    }
+    const { status, body } = await req('GET', '/api/v1/compliance/audits?limit=2&offset=0', undefined, AUTH);
+    assert.equal(status, 200);
+    assert.ok(body.pagination, 'response must include pagination object');
+    assert.equal(body.pagination.total, 3);
+    assert.equal(body.pagination.limit, 2);
+    assert.equal(body.pagination.offset, 0);
+    assert.equal(body.pagination.hasMore, true);
+  });
+
+  test('pagination.hasMore is false on the last page', async () => {
+    for (let i = 0; i < 3; i++) {
+      const p = { ...VALID_AUDIT_PAYLOAD, release: { ...VALID_AUDIT_PAYLOAD.release, tag: `v1.0.${i}` } };
+      await req('POST', '/api/v1/compliance/audit', p, AUTH);
+    }
+    const { status, body } = await req('GET', '/api/v1/compliance/audits?limit=2&offset=2', undefined, AUTH);
+    assert.equal(status, 200);
+    assert.equal(body.pagination.total, 3);
+    assert.equal(body.pagination.offset, 2);
+    assert.equal(body.jobs.length, 1);
+    assert.equal(body.pagination.hasMore, false);
+  });
+
+  test('pagination.total reflects repository filter', async () => {
+    const p1 = { ...VALID_AUDIT_PAYLOAD, repository: 'acme/widgets' };
+    const p2 = { ...VALID_AUDIT_PAYLOAD, repository: 'acme/other-repo' };
+    await req('POST', '/api/v1/compliance/audit', p1, AUTH);
+    await req('POST', '/api/v1/compliance/audit', p2, AUTH);
+
+    const { body } = await req('GET', '/api/v1/compliance/audits?repository=acme%2Fwidgets', undefined, AUTH);
+    assert.equal(body.pagination.total, 1);
+    assert.equal(body.pagination.hasMore, false);
+  });
+
+  test('offset beyond total returns empty jobs with hasMore false', async () => {
+    await req('POST', '/api/v1/compliance/audit', VALID_AUDIT_PAYLOAD, AUTH);
+    const { status, body } = await req('GET', '/api/v1/compliance/audits?offset=100', undefined, AUTH);
+    assert.equal(status, 200);
+    assert.equal(body.jobs.length, 0);
+    assert.equal(body.pagination.total, 1);
+    assert.equal(body.pagination.hasMore, false);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // GET /api/v1/compliance/audits — rate limiting
 // ---------------------------------------------------------------------------
 
@@ -1793,14 +1905,14 @@ describe('GET /api/v1/compliance/audits — rate limiting', () => {
 // ---------------------------------------------------------------------------
 
 describe('_findJobsInAuditLog', () => {
-  test('returns empty array when log file does not exist', async () => {
+  test('returns empty records and zero total when log file does not exist', async () => {
     process.env.AUDIT_LOG_FILE = '/tmp/govos-nonexistent-log-file.ndjson';
     const result = await _findJobsInAuditLog({ orgId: null, limit: 50 });
-    assert.deepEqual(result, []);
+    assert.deepEqual(result.records, []);
+    assert.equal(result.total, 0);
   });
 
   test('returns all records when orgId is null', async () => {
-    // Use the writeFile helper to create a log with two records from different orgs
     const { writeFile: wf } = await import('node:fs/promises');
     const logPath = join(testDataDir, 'unit-test-log.ndjson');
     const r1 = { jobId: 'j1', repository: 'acme/a', submittedAt: '2026-01-01T00:00:00Z' };
@@ -1809,7 +1921,8 @@ describe('_findJobsInAuditLog', () => {
     process.env.AUDIT_LOG_FILE = logPath;
 
     const result = await _findJobsInAuditLog({ orgId: null, limit: 50 });
-    assert.equal(result.length, 2);
+    assert.equal(result.records.length, 2);
+    assert.equal(result.total, 2);
   });
 
   test('filters by orgId when provided', async () => {
@@ -1822,8 +1935,9 @@ describe('_findJobsInAuditLog', () => {
     process.env.AUDIT_LOG_FILE = logPath;
 
     const result = await _findJobsInAuditLog({ orgId: 'acme', limit: 50 });
-    assert.equal(result.length, 2);
-    for (const r of result) {
+    assert.equal(result.records.length, 2);
+    assert.equal(result.total, 2);
+    for (const r of result.records) {
       assert.equal(r.repository.split('/')[0], 'acme');
     }
   });
@@ -1839,7 +1953,8 @@ describe('_findJobsInAuditLog', () => {
     process.env.AUDIT_LOG_FILE = logPath;
 
     const result = await _findJobsInAuditLog({ orgId: null, limit: 3 });
-    assert.equal(result.length, 3);
+    assert.equal(result.records.length, 3);
+    assert.equal(result.total, 5);
   });
 
   test('returns records sorted newest first', async () => {
@@ -1852,9 +1967,9 @@ describe('_findJobsInAuditLog', () => {
     process.env.AUDIT_LOG_FILE = logPath;
 
     const result = await _findJobsInAuditLog({ orgId: null, limit: 50 });
-    assert.equal(result[0].jobId, 'j2'); // newest
-    assert.equal(result[1].jobId, 'j3');
-    assert.equal(result[2].jobId, 'j1'); // oldest
+    assert.equal(result.records[0].jobId, 'j2'); // newest
+    assert.equal(result.records[1].jobId, 'j3');
+    assert.equal(result.records[2].jobId, 'j1'); // oldest
   });
 
   test('skips malformed NDJSON lines', async () => {
@@ -1865,7 +1980,39 @@ describe('_findJobsInAuditLog', () => {
     process.env.AUDIT_LOG_FILE = logPath;
 
     const result = await _findJobsInAuditLog({ orgId: null, limit: 50 });
-    assert.equal(result.length, 1);
-    assert.equal(result[0].jobId, 'j1');
+    assert.equal(result.records.length, 1);
+    assert.equal(result.records[0].jobId, 'j1');
+  });
+
+  test('respects offset parameter', async () => {
+    const { writeFile: wf } = await import('node:fs/promises');
+    const logPath = join(testDataDir, 'unit-test-offset.ndjson');
+    const records = Array.from({ length: 4 }, (_, i) => ({
+      jobId: `j${i}`, repository: 'acme/x',
+      submittedAt: `2026-01-0${i + 1}T00:00:00Z`,
+    }));
+    await wf(logPath, records.map(r => JSON.stringify(r)).join('\n') + '\n', 'utf8');
+    process.env.AUDIT_LOG_FILE = logPath;
+
+    const result = await _findJobsInAuditLog({ orgId: null, limit: 2, offset: 2 });
+    assert.equal(result.records.length, 2);
+    assert.equal(result.total, 4);
+  });
+
+  test('filters by repository (exact match) when provided', async () => {
+    const { writeFile: wf } = await import('node:fs/promises');
+    const logPath = join(testDataDir, 'unit-test-repo-filter.ndjson');
+    const r1 = { jobId: 'j1', repository: 'acme/widgets', submittedAt: '2026-01-01T00:00:00Z' };
+    const r2 = { jobId: 'j2', repository: 'acme/other',   submittedAt: '2026-01-02T00:00:00Z' };
+    const r3 = { jobId: 'j3', repository: 'acme/widgets', submittedAt: '2026-01-03T00:00:00Z' };
+    await wf(logPath, [r1, r2, r3].map(r => JSON.stringify(r)).join('\n') + '\n', 'utf8');
+    process.env.AUDIT_LOG_FILE = logPath;
+
+    const result = await _findJobsInAuditLog({ orgId: null, limit: 50, repository: 'acme/widgets' });
+    assert.equal(result.records.length, 2);
+    assert.equal(result.total, 2);
+    for (const r of result.records) {
+      assert.equal(r.repository, 'acme/widgets');
+    }
   });
 });

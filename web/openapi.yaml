@@ -643,9 +643,12 @@ paths:
         repository owner matches the authenticated organization are returned.
         Single-tenant `LICENSE_SECRET` mode (`orgId` is null) returns all jobs.
 
-        **Pagination:** Use the `?limit` query parameter to cap the number of
-        results (default 50, max 200). Full cursor-based pagination is not yet
-        implemented — for large histories use the raw NDJSON audit log.
+        **Filtering:** Use `?repository=owner/repo` to restrict results to a
+        specific repository (exact match).
+
+        **Pagination:** Use `?limit` (default 50, max 200) and `?offset`
+        (default 0) to page through results. The response includes a
+        `pagination` object with `total`, `limit`, `offset`, and `hasMore`.
 
         **Rate limit:** 30 requests per minute per IP.
       operationId: listAudits
@@ -653,6 +656,15 @@ paths:
         - BearerAuth: []
         - {}  # security is optional — open in dev/free-tier mode
       parameters:
+        - name: repository
+          in: query
+          required: false
+          schema:
+            type: string
+          description: |
+            Filter by repository in `owner/repo` format (exact match).
+            When omitted, all repositories accessible to the authenticated caller are returned.
+          example: "acme/widgets"
         - name: limit
           in: query
           required: false
@@ -661,8 +673,17 @@ paths:
             minimum: 1
             maximum: 200
             default: 50
-          description: Maximum number of audit jobs to return (default 50, max 200)
+          description: Maximum number of audit jobs to return per page (default 50, max 200)
           example: 50
+        - name: offset
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+          description: Number of records to skip before returning results (default 0)
+          example: 0
       responses:
         "200":
           description: Audit history returned successfully
@@ -670,14 +691,14 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [success, count, jobs]
+                required: [success, count, jobs, pagination]
                 properties:
                   success:
                     type: boolean
                     example: true
                   count:
                     type: integer
-                    description: Number of jobs returned
+                    description: Number of jobs returned in this page
                     example: 3
                   jobs:
                     type: array
@@ -688,6 +709,27 @@ paths:
                       Array of audit log records sorted by `submittedAt` descending
                       (newest first). Each record mirrors the shape written to the
                       NDJSON audit log by `POST /api/v1/compliance/audit`.
+                  pagination:
+                    type: object
+                    required: [total, limit, offset, hasMore]
+                    description: Pagination metadata for the current response
+                    properties:
+                      total:
+                        type: integer
+                        description: Total number of records matching the current filters (before pagination)
+                        example: 42
+                      limit:
+                        type: integer
+                        description: Maximum records per page (as requested or defaulted)
+                        example: 50
+                      offset:
+                        type: integer
+                        description: Number of records skipped (as requested or defaulted)
+                        example: 0
+                      hasMore:
+                        type: boolean
+                        description: Whether there are more records beyond this page
+                        example: false
         "400":
           description: Invalid `limit` query parameter
           content:
