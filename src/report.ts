@@ -12,6 +12,7 @@
  */
 
 import type {
+  CommitMetadata,
   ComplianceReport,
   EvaluateResult,
   Release,
@@ -35,6 +36,7 @@ export const TOOL_VERSION = "0.1.0";
  * @param params.evaluation   Result of {@link evaluateChecklist}.
  * @param params.tier         Which tier produced the evaluation.
  * @param params.generatedAt  ISO-8601 timestamp; injected for determinism.
+ * @param params.commits      Optional commit enrichment from the GitHub API.
  */
 export function buildComplianceReport(params: {
   release: Release;
@@ -42,10 +44,11 @@ export function buildComplianceReport(params: {
   evaluation: EvaluateResult;
   tier: "free" | "premium";
   generatedAt: string;
+  commits?: CommitMetadata;
 }): ComplianceReport {
-  const { release, repo, evaluation, tier, generatedAt } = params;
+  const { release, repo, evaluation, tier, generatedAt, commits } = params;
 
-  return {
+  const report: ComplianceReport = {
     schemaVersion: REPORT_SCHEMA_VERSION,
     generatedAt,
     tool: { name: TOOL_NAME, version: TOOL_VERSION },
@@ -68,6 +71,12 @@ export function buildComplianceReport(params: {
       checks: evaluation.results.map((r) => ({ ...r })),
     },
   };
+
+  if (commits !== undefined) {
+    report.commits = commits;
+  }
+
+  return report;
 }
 
 /**

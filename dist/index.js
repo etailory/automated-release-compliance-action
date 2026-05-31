@@ -22860,8 +22860,8 @@ var REPORT_SCHEMA_VERSION = "1.0";
 var TOOL_NAME = "automated-release-compliance-action";
 var TOOL_VERSION = "0.1.0";
 function buildComplianceReport(params) {
-  const { release, repo, evaluation, tier, generatedAt } = params;
-  return {
+  const { release, repo, evaluation, tier, generatedAt, commits } = params;
+  const report = {
     schemaVersion: REPORT_SCHEMA_VERSION,
     generatedAt,
     tool: { name: TOOL_NAME, version: TOOL_VERSION },
@@ -22883,6 +22883,10 @@ function buildComplianceReport(params) {
       checks: evaluation.results.map((r) => ({ ...r }))
     }
   };
+  if (commits !== undefined) {
+    report.commits = commits;
+  }
+  return report;
 }
 function serializeReport(report) {
   return `${JSON.stringify(report, null, 2)}
@@ -22924,6 +22928,46 @@ function parseReleaseFromContext(context2) {
     body: ""
   };
 }
+async function fetchReleaseCommits(octokit, repo, currentTag, logger) {
+  try {
+    const tagsResponse = await octokit.rest.repos.listTags({
+      owner: repo.owner,
+      repo: repo.repo,
+      per_page: 10
+    });
+    const tags = tagsResponse.data.map((t) => t.name);
+    const currentIndex = tags.indexOf(currentTag);
+    if (currentIndex === -1) {
+      logger.warning(`Tag ${currentTag} not found in recent tags list; skipping commit enrichment.`);
+      return;
+    }
+    const previousTag = tags[currentIndex + 1];
+    if (!previousTag) {
+      logger.warning(`No previous tag found for ${currentTag}; skipping commit enrichment.`);
+      return;
+    }
+    const compareResponse = await octokit.rest.repos.compareCommitsWithBasehead({
+      owner: repo.owner,
+      repo: repo.repo,
+      basehead: `${previousTag}...${currentTag}`
+    });
+    const commits = compareResponse.data.commits;
+    const authorsSet = new Set;
+    for (const commit of commits) {
+      const author = commit.author?.login ?? commit.commit.author?.name ?? "unknown";
+      authorsSet.add(author);
+    }
+    logger.info(`Commit enrichment: ${commits.length} commits by [${[...authorsSet].join(", ")}] between ${previousTag} and ${currentTag}.`);
+    return {
+      count: commits.length,
+      authors: [...authorsSet],
+      shas: commits.map((c) => c.sha)
+    };
+  } catch (err) {
+    logger.warning(`Failed to fetch commit metadata: ${err.message}; skipping commit enrichment.`);
+    return;
+  }
+}
 async function reportFreeTier(release, evaluation, profile) {
   core.info("─".repeat(60));
   core.info(`Release compliance check — ${release.name} (${release.tag})`);
@@ -22949,13 +22993,14 @@ async function reportFreeTier(release, evaluation, profile) {
   }
 }
 var VALID_PROFILES = ["default", "iso27001", "soc2", "dora"];
-function writeComplianceReport(reportPath, release, repo, evaluation, tier) {
+function writeComplianceReport(reportPath, release, repo, evaluation, tier, commits) {
   const report = buildComplianceReport({
     release,
     repo,
     evaluation,
     tier,
-    generatedAt: new Date().toISOString()
+    generatedAt: new Date().toISOString(),
+    commits
   });
   const dir = dirname(reportPath);
   if (dir && dir !== ".") {
@@ -22993,7 +23038,19 @@ async function run() {
     core.setOutput("tier", tier);
     if (reportPath) {
       const repo = context2.repo ?? { owner: "", repo: "" };
-      writeComplianceReport(reportPath, release, repo, evaluation, tier);
+      let commits;
+      if (context2.payload?.release) {
+        const octokit = github.getOctokit(token);
+        const logger = {
+          info: (m) => core.info(m),
+          warning: (m) => core.warning(m),
+          debug: (m) => core.debug(m)
+        };
+        commits = await fetchReleaseCommits(octokit, repo, release.tag, logger);
+      } else {
+        core.debug("Not a release event; skipping commit enrichment.");
+      }
+      writeComplianceReport(reportPath, release, repo, evaluation, tier, commits);
     }
     if (licenseKey) {
       await runPremiumAudit({
@@ -23021,5 +23078,6 @@ if (__require.main == __require.module) {
 }
 export {
   run,
-  parseReleaseFromContext
+  parseReleaseFromContext,
+  fetchReleaseCommits
 };
