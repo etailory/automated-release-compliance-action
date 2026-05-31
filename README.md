@@ -122,9 +122,26 @@ docker build -t governor-os-web .
 docker run --rm -p 3000:3000 governor-os-web
 ```
 
-The server starts on `http://localhost:3000`. Set `COMPLIANCE_BACKEND_URL` in
-your GitHub Actions workflow to point to the public URL where you've deployed
-this container:
+The server starts on `http://localhost:3000`.
+
+### Verify your deployment
+
+After bringing the container up, run the smoke-test script to confirm the
+server is healthy and the admin API is correctly wired:
+
+```bash
+ADMIN_SECRET=your-secret bash scripts/smoke-test.sh
+# or against a remote deployment:
+BASE_URL=https://compliance.your-company.com ADMIN_SECRET=your-secret bash scripts/smoke-test.sh
+```
+
+The script checks `/health`, creates a temporary test org via `POST /admin/orgs`,
+confirms it appears in `GET /admin/orgs`, and removes it with
+`DELETE /admin/orgs/:id`. It prints a pass/fail summary and exits 0 only when
+all checks succeed.
+
+Set `COMPLIANCE_BACKEND_URL` in your GitHub Actions workflow to point to the
+public URL where you've deployed this container:
 
 ```yaml
 - uses: markgrendev/automated-release-compliance-action@dev
