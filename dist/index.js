@@ -22810,11 +22810,13 @@ var DEFAULT_RULES = [
   {
     id: "has-description",
     label: "Release notes contain a description of the changes",
+    controlRef: "CTRL-1",
     test: (body) => countWords(body) >= MIN_DESCRIPTION_WORDS
   },
   {
     id: "has-issue-reference",
     label: "Release notes link to an issue, pull request, or ticket",
+    controlRef: "CTRL-2",
     test: (body) => ISSUE_REFERENCE.test(body),
     extract: (body) => {
       ISSUE_REFERENCE_G.lastIndex = 0;
@@ -22831,6 +22833,7 @@ var DEFAULT_RULES = [
   {
     id: "not-placeholder",
     label: "Release notes are not an empty or auto-generated placeholder",
+    controlRef: "CTRL-3",
     test: (body) => {
       const normalized = body.trim().toLowerCase();
       if (normalized.length === 0)
@@ -22842,6 +22845,7 @@ var DEFAULT_RULES = [
   {
     id: "has-changelog-section",
     label: "Release notes include a changelog or 'What's Changed' section heading",
+    controlRef: "CTRL-4",
     test: (body) => CHANGELOG_HEADER.test(body),
     extract: (body) => {
       const m = CHANGELOG_HEADER.exec(body);
@@ -22851,6 +22855,7 @@ var DEFAULT_RULES = [
   {
     id: "meets-min-length",
     label: `Release notes are at least ${MIN_BODY_CHARS} characters`,
+    controlRef: "CTRL-5",
     test: (body) => body.trim().length >= MIN_BODY_CHARS
   }
 ];
@@ -22859,6 +22864,7 @@ var ISO27001_RULES = [
   {
     id: "has-security-note",
     label: "Release notes acknowledge security review or confirm no security impact",
+    controlRef: "A.12.1.2",
     test: (body) => SECURITY_NOTE.test(body)
   }
 ];
@@ -22867,6 +22873,7 @@ var SOC2_RULES = [
   {
     id: "has-testing-evidence",
     label: "Release notes include evidence of testing or QA sign-off",
+    controlRef: "CC8.1",
     test: (body) => TESTING_EVIDENCE.test(body)
   }
 ];
@@ -22875,6 +22882,7 @@ var DORA_RULES = [
   {
     id: "has-risk-impact",
     label: "Release notes include a risk or impact assessment (DORA operational resilience)",
+    controlRef: "Art.9",
     test: (body) => RISK_IMPACT.test(body)
   }
 ];
@@ -22900,6 +22908,8 @@ function evaluateChecklist(body = "", ctx = {}, rules = DEFAULT_RULES) {
   const results = rules.map((rule) => {
     const ok = Boolean(rule.test(safeBody, ctx));
     const result = { id: rule.id, label: rule.label, ok };
+    if (rule.controlRef)
+      result.controlRef = rule.controlRef;
     if (rule.extract) {
       const evidence = rule.extract(safeBody);
       if (evidence.length > 0)

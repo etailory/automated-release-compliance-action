@@ -119,7 +119,13 @@ a release was checked against the checklist at publish time.
   "tier": "free",
   "repository": "acme/widgets",
   "release": { "tag": "v1.2.0", "name": "Spring Release", "isPrerelease": false, "isDraft": false, "publishedAt": "2026-05-30T00:00:00Z", "author": "octocat", "url": "https://github.com/acme/widgets/releases/tag/v1.2.0" },
-  "compliance": { "passed": true, "score": 3, "total": 3, "checks": [ /* … */ ] },
+  "compliance": { "passed": true, "score": 5, "total": 5, "checks": [
+    { "id": "has-description", "label": "Release notes contain a description of the changes", "ok": true, "controlRef": "CTRL-1" },
+    { "id": "has-issue-reference", "label": "Release notes link to an issue, pull request, or ticket", "ok": true, "controlRef": "CTRL-2", "evidence": ["#42"] },
+    { "id": "not-placeholder", "label": "Release notes are not an empty or auto-generated placeholder", "ok": true, "controlRef": "CTRL-3" },
+    { "id": "has-changelog-section", "label": "Release notes include a changelog or 'What's Changed' section heading", "ok": true, "controlRef": "CTRL-4", "evidence": ["## What's Changed"] },
+    { "id": "meets-min-length", "label": "Release notes are at least 80 characters", "ok": true, "controlRef": "CTRL-5" }
+  ] },
   "commits": { "count": 12, "authors": ["octocat", "codercat"], "firstSha": "abc1234", "lastSha": "def5678" },
   "integrityHash": "a3f1e2b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2"
 }

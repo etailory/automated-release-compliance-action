@@ -230,6 +230,55 @@ test("evidence is deep-copied in compliance report snapshot", () => {
   expect(reportCheck.evidence).not.toContain("FAKE-999");
 });
 
+// --- controlRef pass-through ---
+
+test("default profile: has-description carries controlRef CTRL-1", () => {
+  const result = evaluateChecklist(FULL_RELEASE_BODY);
+  const check = result.results.find((r) => r.id === "has-description");
+  expect(check?.controlRef).toBe("CTRL-1");
+});
+
+test("default profile: has-issue-reference carries controlRef CTRL-2", () => {
+  const result = evaluateChecklist(FULL_RELEASE_BODY);
+  const check = result.results.find((r) => r.id === "has-issue-reference");
+  expect(check?.controlRef).toBe("CTRL-2");
+});
+
+test("iso27001 profile: has-security-note carries controlRef A.12.1.2", () => {
+  const rules = getRulesForProfile("iso27001");
+  const result = evaluateChecklist(FULL_RELEASE_BODY, {}, rules);
+  const check = result.results.find((r) => r.id === "has-security-note");
+  expect(check?.controlRef).toBe("A.12.1.2");
+});
+
+test("soc2 profile: has-testing-evidence carries controlRef CC8.1", () => {
+  const rules = getRulesForProfile("soc2");
+  const result = evaluateChecklist(FULL_RELEASE_BODY, {}, rules);
+  const check = result.results.find((r) => r.id === "has-testing-evidence");
+  expect(check?.controlRef).toBe("CC8.1");
+});
+
+test("dora profile: has-risk-impact carries controlRef Art.9", () => {
+  const rules = getRulesForProfile("dora");
+  const result = evaluateChecklist(FULL_RELEASE_BODY, {}, rules);
+  const check = result.results.find((r) => r.id === "has-risk-impact");
+  expect(check?.controlRef).toBe("Art.9");
+});
+
+test("controlRef is included in compliance report checks", () => {
+  const evaluation = evaluateChecklist(FULL_RELEASE_BODY);
+  const report = buildComplianceReport({
+    release: { tag: "v1.0.0", name: "GA", body: FULL_RELEASE_BODY, isPrerelease: false, isDraft: false, publishedAt: null, author: "a", url: null },
+    repo: { owner: "acme", repo: "widgets" },
+    evaluation,
+    tier: "free",
+    profile: "default",
+    generatedAt: "2026-05-31T00:00:00Z",
+  });
+  const check = report.compliance.checks.find((c) => c.id === "has-description");
+  expect(check?.controlRef).toBe("CTRL-1");
+});
+
 test("buildAuditPayload shapes the premium request", () => {
   const release: Release = {
     tag: "v1.0.0",

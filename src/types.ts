@@ -4,6 +4,8 @@ export interface CheckRule {
   test: (body: string, ctx?: Record<string, unknown>) => boolean;
   /** Optional: extract the specific text/references that satisfied this check. */
   extract?: (body: string) => string[];
+  /** Regulatory control reference (e.g. "CTRL-1", "A.12.1.2", "CC8.1", "Art.9"). */
+  controlRef?: string;
 }
 
 export interface CheckResult {
@@ -12,6 +14,8 @@ export interface CheckResult {
   ok: boolean;
   /** Specific text or references found by this check (populated when available). */
   evidence?: string[];
+  /** Regulatory control reference traceable to a specific framework control. */
+  controlRef?: string;
 }
 
 export interface EvaluateResult {
