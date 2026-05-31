@@ -23093,8 +23093,45 @@ function serializeReport(report) {
 `;
 }
 
+// src/summary.ts
+async function buildJobSummary(params, builder) {
+  const { repo, release, evaluation, profile, tier, generatedAt, reportPath } = params;
+  const repoFullName = `${repo.owner}/${repo.repo}`;
+  const overallIcon = evaluation.passed ? "✅" : "❌";
+  builder.addHeading("Release Compliance Report", 2).addTable([
+    [
+      { data: "Field", header: true },
+      { data: "Value", header: true }
+    ],
+    ["Repository", repoFullName],
+    ["Release Tag", `\`${release.tag}\``],
+    ["Release Name", release.name],
+    ["Compliance Profile", `\`${profile}\``],
+    ["Generated At", generatedAt]
+  ]).addHeading("Checklist Results", 3).addTable([
+    [
+      { data: "Status", header: true },
+      { data: "Check", header: true },
+      { data: "Notes", header: true }
+    ],
+    ...evaluation.results.map((item) => [
+      item.ok ? "✅" : "❌",
+      item.label,
+      item.evidence?.join(", ") ?? ""
+    ])
+  ]).addRaw(`
+**Overall:** ${overallIcon} ${evaluation.score}/${evaluation.total} checks passed` + ` — Tier: \`${tier}\`
+`);
+  if (reportPath) {
+    builder.addRaw(`
+**Artifact:** \`${reportPath}\`
+`);
+  }
+  await builder.write();
+}
+
 // src/index.ts
-async function reportFreeTier(release, evaluation, profile) {
+async function reportFreeTier(repo, release, evaluation, profile, tier, generatedAt, reportPath) {
   core.info("─".repeat(60));
   core.info(`Release compliance check — ${release.name} (${release.tag})`);
   core.info(`Profile: ${profile} | Result: ${evaluation.score}/${evaluation.total} checks passed`);
@@ -23104,16 +23141,7 @@ async function reportFreeTier(release, evaluation, profile) {
   }
   core.info("─".repeat(60));
   try {
-    await core.summary.addHeading("Release Compliance Report", 2).addRaw(`**Release:** \`${release.tag}\` — ${release.name}
-
-`).addRaw(`**Profile:** \`${profile}\` | **Result:** ${evaluation.score}/${evaluation.total} checks passed (tier: free)
-`).addTable([
-      [
-        { data: "Status", header: true },
-        { data: "Check", header: true }
-      ],
-      ...evaluation.results.map((item) => [item.ok ? "✅" : "❌", item.label])
-    ]).write();
+    await buildJobSummary({ repo, release, evaluation, profile, tier, generatedAt, reportPath }, core.summary);
   } catch (err) {
     core.debug(`Could not write job summary: ${err.message}`);
   }
@@ -23155,15 +23183,15 @@ async function run() {
       core.setOutput("profile", profile);
       return;
     }
+    const repo = context2.repo ?? { owner: "", repo: "" };
+    const tier = licenseKey ? "premium" : "free";
     const rules = getRulesForProfile(profile);
     const evaluation = evaluateChecklist(body, { release }, rules);
-    await reportFreeTier(release, evaluation, profile);
+    await reportFreeTier(repo, release, evaluation, profile, tier, new Date().toISOString(), reportPath || undefined);
     core.setOutput("passed", String(evaluation.passed));
     core.setOutput("score", `${evaluation.score}/${evaluation.total}`);
     core.setOutput("profile", profile);
-    const tier = licenseKey ? "premium" : "free";
     core.setOutput("tier", tier);
-    const repo = context2.repo ?? { owner: "", repo: "" };
     let commits;
     if (context2.payload.release) {
       const octokit = github.getOctokit(token);

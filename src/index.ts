@@ -9,15 +9,20 @@ import { parseReleaseFromContext } from "./context.js";
 import { evaluateChecklist, getRulesForProfile } from "./checklist.js";
 import { runPremiumAudit } from "./premium.js";
 import { buildComplianceReport, serializeReport } from "./report.js";
+import { buildJobSummary } from "./summary.js";
 import type { ActionContext, CommitMetadata, Release, Repo, EvaluateResult, ComplianceProfile, Logger } from "./types.js";
 
 export { parseReleaseFromContext };
 
 /** Render the free-tier checklist results to the GitHub job summary + log. */
 async function reportFreeTier(
+  repo: Repo,
   release: Release,
   evaluation: EvaluateResult,
-  profile: ComplianceProfile
+  profile: ComplianceProfile,
+  tier: "free" | "premium",
+  generatedAt: string,
+  reportPath?: string
 ): Promise<void> {
   core.info("─".repeat(60));
   core.info(`Release compliance check — ${release.name} (${release.tag})`);
@@ -30,20 +35,10 @@ async function reportFreeTier(
   core.info("─".repeat(60));
 
   try {
-    await core.summary
-      .addHeading("Release Compliance Report", 2)
-      .addRaw(`**Release:** \`${release.tag}\` — ${release.name}\n\n`)
-      .addRaw(
-        `**Profile:** \`${profile}\` | **Result:** ${evaluation.score}/${evaluation.total} checks passed (tier: free)\n`
-      )
-      .addTable([
-        [
-          { data: "Status", header: true },
-          { data: "Check", header: true },
-        ],
-        ...evaluation.results.map((item) => [item.ok ? "✅" : "❌", item.label]),
-      ])
-      .write();
+    await buildJobSummary(
+      { repo, release, evaluation, profile, tier, generatedAt, reportPath },
+      core.summary
+    );
   } catch (err) {
     // Summary is best-effort (e.g. unavailable in some runners); never fail on it.
     core.debug(`Could not write job summary: ${(err as Error).message}`);
@@ -113,20 +108,28 @@ export async function run(): Promise<void> {
     }
 
     // --- Free tier: always runs, fully local. ---------------------------------
+    const repo = context.repo ?? { owner: "", repo: "" };
+    const tier = licenseKey ? "premium" : "free";
     const rules = getRulesForProfile(profile);
     const evaluation = evaluateChecklist(body, { release }, rules);
-    await reportFreeTier(release, evaluation, profile);
+    await reportFreeTier(
+      repo,
+      release,
+      evaluation,
+      profile,
+      tier,
+      new Date().toISOString(),
+      reportPath || undefined
+    );
 
     core.setOutput("passed", String(evaluation.passed));
     core.setOutput("score", `${evaluation.score}/${evaluation.total}`);
     core.setOutput("profile", profile);
 
     // --- Premium gate: only when a license key is present. --------------------
-    const tier = licenseKey ? "premium" : "free";
     core.setOutput("tier", tier);
 
     // --- Commit metadata enrichment: best-effort, release events only. --------
-    const repo = context.repo ?? { owner: "", repo: "" };
     let commits: CommitMetadata | undefined;
     if (context.payload.release) {
       const octokit = github.getOctokit(token);
