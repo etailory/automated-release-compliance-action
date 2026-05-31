@@ -32,6 +32,11 @@ inputs:
     required: false
     default: ""
 
+  custom-rules-path:
+    description: "Optional path (relative to the workspace root) to a JSON file defining additional compliance rules to merge with the selected profile. Each rule must have 'id', 'label', and 'pattern' (a regex source string) fields; 'controlRef' is optional."
+    required: false
+    default: ""
+
 outputs:
   passed:
     description: "'true' if the release satisfied the basic compliance checklist, otherwise 'false'."

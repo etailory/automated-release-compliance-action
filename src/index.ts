@@ -7,6 +7,7 @@ import * as github from "@actions/github";
 import { fetchReleaseCommits } from "./commits.js";
 import { parseReleaseFromContext } from "./context.js";
 import { evaluateChecklist, getRulesForProfile } from "./checklist.js";
+import { loadCustomRules } from "./custom-rules.js";
 import { runPremiumAudit } from "./premium.js";
 import { buildComplianceReport, computeReportHash, serializeReport } from "./report.js";
 import { buildJobSummary } from "./summary.js";
@@ -123,7 +124,11 @@ export async function run(): Promise<void> {
     // --- Free tier: always runs, fully local. ---------------------------------
     const repo = context.repo ?? { owner: "", repo: "" };
     const tier = licenseKey ? "premium" : "free";
-    const rules = getRulesForProfile(profile);
+    const customRulesPath = core.getInput("custom-rules-path").trim();
+    const profileRules = getRulesForProfile(profile);
+    const rules = customRulesPath
+      ? [...profileRules, ...loadCustomRules(customRulesPath)]
+      : profileRules;
     const evaluation = evaluateChecklist(body, { release }, rules);
     const generatedAt = new Date().toISOString();
 

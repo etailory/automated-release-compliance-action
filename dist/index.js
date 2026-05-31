@@ -22930,6 +22930,56 @@ function evaluateChecklist(body = "", ctx = {}, rules = DEFAULT_RULES) {
   };
 }
 
+// src/custom-rules.ts
+import { readFileSync } from "node:fs";
+function loadCustomRules(filePath) {
+  let raw;
+  try {
+    raw = readFileSync(filePath, "utf8");
+  } catch (err) {
+    throw new Error(`custom-rules-path: cannot read file "${filePath}": ${err.message}`);
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    throw new Error(`custom-rules-path: "${filePath}" is not valid JSON: ${err.message}`);
+  }
+  if (!Array.isArray(parsed)) {
+    throw new Error(`custom-rules-path: "${filePath}" must contain a JSON array of rule objects.`);
+  }
+  return parsed.map((item, index) => {
+    if (typeof item !== "object" || item === null) {
+      throw new Error(`custom-rules-path: rule at index ${index} must be an object.`);
+    }
+    const rule = item;
+    if (typeof rule.id !== "string" || rule.id.trim() === "") {
+      throw new Error(`custom-rules-path: rule at index ${index} is missing a required string "id" field.`);
+    }
+    if (typeof rule.label !== "string" || rule.label.trim() === "") {
+      throw new Error(`custom-rules-path: rule at index ${index} is missing a required string "label" field.`);
+    }
+    if (typeof rule.pattern !== "string" || rule.pattern.trim() === "") {
+      throw new Error(`custom-rules-path: rule at index ${index} is missing a required string "pattern" field.`);
+    }
+    let regex;
+    try {
+      regex = new RegExp(rule.pattern, "i");
+    } catch (err) {
+      throw new Error(`custom-rules-path: rule "${rule.id}" has an invalid regex pattern "${rule.pattern}": ${err.message}`);
+    }
+    const checkRule = {
+      id: rule.id,
+      label: rule.label,
+      test: (body) => regex.test(body)
+    };
+    if (typeof rule.controlRef === "string" && rule.controlRef.trim() !== "") {
+      checkRule.controlRef = rule.controlRef;
+    }
+    return checkRule;
+  });
+}
+
 // src/premium.ts
 var AUDIT_PATH = "/api/v1/compliance/audit";
 var DEFAULT_TIMEOUT_MS = 1e4;
@@ -23241,7 +23291,9 @@ async function run() {
     }
     const repo = context2.repo ?? { owner: "", repo: "" };
     const tier = licenseKey ? "premium" : "free";
-    const rules = getRulesForProfile(profile);
+    const customRulesPath = core.getInput("custom-rules-path").trim();
+    const profileRules = getRulesForProfile(profile);
+    const rules = customRulesPath ? [...profileRules, ...loadCustomRules(customRulesPath)] : profileRules;
     const evaluation = evaluateChecklist(body, { release }, rules);
     const generatedAt = new Date().toISOString();
     let commits;
