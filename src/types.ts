@@ -2,12 +2,16 @@ export interface CheckRule {
   id: string;
   label: string;
   test: (body: string, ctx?: Record<string, unknown>) => boolean;
+  /** Optional: extract the specific text/references that satisfied this check. */
+  extract?: (body: string) => string[];
 }
 
 export interface CheckResult {
   id: string;
   label: string;
   ok: boolean;
+  /** Specific text or references found by this check (populated when available). */
+  evidence?: string[];
 }
 
 export interface EvaluateResult {

@@ -2,6 +2,7 @@ import { test, expect } from "bun:test";
 
 import { evaluateChecklist, getRulesForProfile, DEFAULT_RULES, ISO27001_RULES, SOC2_RULES, DORA_RULES } from "../src/checklist.js";
 import { buildAuditPayload } from "../src/premium.js";
+import { buildComplianceReport } from "../src/report.js";
 import { parseReleaseFromContext } from "../src/index.js";
 import type { Release, Repo } from "../src/types.js";
 
@@ -166,6 +167,67 @@ test("dora profile: has-risk-impact fails without risk assessment", () => {
   const result = evaluateChecklist(body, {}, rules);
   const check = result.results.find((r) => r.id === "has-risk-impact");
   expect(check?.ok).toBe(false);
+});
+
+// --- evidence extraction ---
+
+test("has-issue-reference evidence lists all GitHub issue refs", () => {
+  const body = "Fixed the billing bug. See #42 and #43 for details.";
+  const result = evaluateChecklist(body);
+  const check = result.results.find((r) => r.id === "has-issue-reference");
+  expect(check?.ok).toBe(true);
+  expect(check?.evidence).toContain("#42");
+  expect(check?.evidence).toContain("#43");
+  expect(check?.evidence?.length).toBe(2);
+});
+
+test("has-issue-reference evidence lists JIRA-style ticket refs", () => {
+  const body = "Resolved PROJ-1234 and ABC-99 issues in this release.";
+  const result = evaluateChecklist(body);
+  const check = result.results.find((r) => r.id === "has-issue-reference");
+  expect(check?.ok).toBe(true);
+  expect(check?.evidence).toContain("PROJ-1234");
+  expect(check?.evidence).toContain("ABC-99");
+});
+
+test("has-issue-reference evidence is absent when check fails", () => {
+  const body = "Shipped some internal improvements to the codebase.";
+  const result = evaluateChecklist(body);
+  const check = result.results.find((r) => r.id === "has-issue-reference");
+  expect(check?.ok).toBe(false);
+  expect(check?.evidence).toBeUndefined();
+});
+
+test("has-issue-reference evidence deduplicates repeated refs", () => {
+  const body = "Fixes #42, closes #42, see #42.";
+  const result = evaluateChecklist(body);
+  const check = result.results.find((r) => r.id === "has-issue-reference");
+  expect(check?.evidence).toEqual(["#42"]);
+});
+
+test("has-changelog-section evidence captures the matched heading", () => {
+  const body = "## What's Changed\n\nFixed the billing bug. See #5 for details.";
+  const result = evaluateChecklist(body);
+  const check = result.results.find((r) => r.id === "has-changelog-section");
+  expect(check?.ok).toBe(true);
+  expect(check?.evidence?.[0]).toMatch(/what'?s\s+changed/i);
+});
+
+test("evidence is deep-copied in compliance report snapshot", () => {
+  const body = "Fixed the billing bug. See #42 for details. Ref ABC-99.";
+  const evaluation = evaluateChecklist(body);
+  const report = buildComplianceReport({
+    release: { tag: "v1.0.0", name: "GA", body, isPrerelease: false, isDraft: false, publishedAt: null, author: "a", url: null },
+    repo: { owner: "acme", repo: "widgets" },
+    evaluation,
+    tier: "free",
+    generatedAt: "2026-05-31T00:00:00Z",
+  });
+  const issueCheck = evaluation.results.find((r) => r.id === "has-issue-reference")!;
+  const reportCheck = report.compliance.checks.find((c) => c.id === "has-issue-reference")!;
+  // Mutating the original evidence must not affect the snapshot.
+  issueCheck.evidence!.push("FAKE-999");
+  expect(reportCheck.evidence).not.toContain("FAKE-999");
 });
 
 test("buildAuditPayload shapes the premium request", () => {

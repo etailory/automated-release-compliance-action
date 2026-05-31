@@ -2,6 +2,8 @@ import type { CheckRule, CheckResult, EvaluateResult, ComplianceProfile } from "
 
 /** Matches links to an issue/PR/ticket: #123, GH URLs, or JIRA-style KEYS (ABC-123). */
 const ISSUE_REFERENCE = /(#\d+)|(\/issues\/\d+)|(\/pull\/\d+)|\b[A-Z][A-Z0-9]+-\d+\b/;
+/** Global variant used to extract all matches from a body string. */
+const ISSUE_REFERENCE_G = new RegExp(ISSUE_REFERENCE.source, "g");
 
 /** A "meaningful description" heuristic: more than a handful of words. */
 const MIN_DESCRIPTION_WORDS = 8;
@@ -31,6 +33,16 @@ export const DEFAULT_RULES: CheckRule[] = [
     id: "has-issue-reference",
     label: "Release notes link to an issue, pull request, or ticket",
     test: (body) => ISSUE_REFERENCE.test(body),
+    extract: (body) => {
+      ISSUE_REFERENCE_G.lastIndex = 0;
+      const found: string[] = [];
+      let m: RegExpExecArray | null;
+      while ((m = ISSUE_REFERENCE_G.exec(body)) !== null) {
+        const ref = m[0].trim();
+        if (ref) found.push(ref);
+      }
+      return [...new Set(found)];
+    },
   },
   {
     id: "not-placeholder",
@@ -46,6 +58,10 @@ export const DEFAULT_RULES: CheckRule[] = [
     id: "has-changelog-section",
     label: "Release notes include a changelog or 'What's Changed' section heading",
     test: (body) => CHANGELOG_HEADER.test(body),
+    extract: (body) => {
+      const m = CHANGELOG_HEADER.exec(body);
+      return m ? [m[0].trim()] : [];
+    },
   },
   {
     id: "meets-min-length",
@@ -111,11 +127,15 @@ export function evaluateChecklist(
   rules: CheckRule[] = DEFAULT_RULES
 ): EvaluateResult {
   const safeBody = typeof body === "string" ? body : "";
-  const results: CheckResult[] = rules.map((rule) => ({
-    id: rule.id,
-    label: rule.label,
-    ok: Boolean(rule.test(safeBody, ctx)),
-  }));
+  const results: CheckResult[] = rules.map((rule) => {
+    const ok = Boolean(rule.test(safeBody, ctx));
+    const result: CheckResult = { id: rule.id, label: rule.label, ok };
+    if (rule.extract) {
+      const evidence = rule.extract(safeBody);
+      if (evidence.length > 0) result.evidence = evidence;
+    }
+    return result;
+  });
 
   const score = results.filter((r) => r.ok).length;
   return {

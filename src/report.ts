@@ -64,8 +64,11 @@ export function buildComplianceReport(params: {
       passed: evaluation.passed,
       score: evaluation.score,
       total: evaluation.total,
-      // Copy each check so the report is a standalone snapshot, not a live reference.
-      checks: evaluation.results.map((r) => ({ ...r })),
+      // Deep-copy each check so the report is a standalone snapshot, not a live reference.
+      checks: evaluation.results.map((r) => ({
+        ...r,
+        ...(r.evidence ? { evidence: [...r.evidence] } : {}),
+      })),
     },
   };
 }

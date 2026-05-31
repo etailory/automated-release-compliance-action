@@ -22717,6 +22717,7 @@ import { dirname } from "node:path";
 
 // src/checklist.ts
 var ISSUE_REFERENCE = /(#\d+)|(\/issues\/\d+)|(\/pull\/\d+)|\b[A-Z][A-Z0-9]+-\d+\b/;
+var ISSUE_REFERENCE_G = new RegExp(ISSUE_REFERENCE.source, "g");
 var MIN_DESCRIPTION_WORDS = 8;
 var MIN_BODY_CHARS = 80;
 var CHANGELOG_HEADER = /^#{1,3}\s*(what'?s\s+changed|change\s*log|changes|breaking\s+changes|release\s+notes)/im;
@@ -22732,7 +22733,18 @@ var DEFAULT_RULES = [
   {
     id: "has-issue-reference",
     label: "Release notes link to an issue, pull request, or ticket",
-    test: (body) => ISSUE_REFERENCE.test(body)
+    test: (body) => ISSUE_REFERENCE.test(body),
+    extract: (body) => {
+      ISSUE_REFERENCE_G.lastIndex = 0;
+      const found = [];
+      let m;
+      while ((m = ISSUE_REFERENCE_G.exec(body)) !== null) {
+        const ref = m[0].trim();
+        if (ref)
+          found.push(ref);
+      }
+      return [...new Set(found)];
+    }
   },
   {
     id: "not-placeholder",
@@ -22748,7 +22760,11 @@ var DEFAULT_RULES = [
   {
     id: "has-changelog-section",
     label: "Release notes include a changelog or 'What's Changed' section heading",
-    test: (body) => CHANGELOG_HEADER.test(body)
+    test: (body) => CHANGELOG_HEADER.test(body),
+    extract: (body) => {
+      const m = CHANGELOG_HEADER.exec(body);
+      return m ? [m[0].trim()] : [];
+    }
   },
   {
     id: "meets-min-length",
@@ -22799,11 +22815,16 @@ function countWords(text) {
 }
 function evaluateChecklist(body = "", ctx = {}, rules = DEFAULT_RULES) {
   const safeBody = typeof body === "string" ? body : "";
-  const results = rules.map((rule) => ({
-    id: rule.id,
-    label: rule.label,
-    ok: Boolean(rule.test(safeBody, ctx))
-  }));
+  const results = rules.map((rule) => {
+    const ok = Boolean(rule.test(safeBody, ctx));
+    const result = { id: rule.id, label: rule.label, ok };
+    if (rule.extract) {
+      const evidence = rule.extract(safeBody);
+      if (evidence.length > 0)
+        result.evidence = evidence;
+    }
+    return result;
+  });
   const score = results.filter((r) => r.ok).length;
   return {
     passed: score === results.length,
@@ -22880,7 +22901,10 @@ function buildComplianceReport(params) {
       passed: evaluation.passed,
       score: evaluation.score,
       total: evaluation.total,
-      checks: evaluation.results.map((r) => ({ ...r }))
+      checks: evaluation.results.map((r) => ({
+        ...r,
+        ...r.evidence ? { evidence: [...r.evidence] } : {}
+      }))
     }
   };
 }
