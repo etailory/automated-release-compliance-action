@@ -87,6 +87,55 @@ a release was checked against the checklist at publish time.
 
 Outputs: `passed`, `score`, `tier`, and `report-path` (set when a report was written).
 
+## Deploy the backend
+
+The premium tier requires a running instance of the Governor OS web server. Use
+Docker or Compose to self-host it alongside your GitHub Actions workflow.
+
+### Quick start with Docker
+
+```bash
+cd web
+docker build -t governor-os-web .
+docker run --rm -p 3000:3000 governor-os-web
+# Verify: curl http://localhost:3000/health
+# → {"status":"ok","service":"governor-os-web","version":"1.0.0"}
+```
+
+### Docker Compose (recommended for local development)
+
+```bash
+cd web
+cp .env.example .env          # fill in LICENSE_SECRET and any other vars
+docker compose up --build
+```
+
+The server starts on `http://localhost:3000`. Set `COMPLIANCE_BACKEND_URL` in
+your GitHub Actions workflow to point to the public URL where you've deployed
+this container:
+
+```yaml
+- uses: markgrendev/automated-release-compliance-action@dev
+  with:
+    github-token: ${{ secrets.GITHUB_TOKEN }}
+    license-key: ${{ secrets.GOVERNOR_LICENSE_KEY }}
+    # URL of your self-hosted Governor OS backend:
+    # backend-url: https://compliance.your-company.com
+```
+
+### Environment variables
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `PORT` | `3000` | HTTP port the server binds to |
+| `LICENSE_SECRET` | — | Secret for signing session tokens (**required in production**) |
+| `DATABASE_URL` | — | PostgreSQL connection string (future) |
+| `GITHUB_OIDC_JWKS_URL` | GitHub default | Override for GitHub Enterprise |
+
+Copy `web/.env.example` to `web/.env` and fill in secrets. Never commit `.env`.
+
+---
+
 ## Development
 
 The `src/` library and tests are written in **TypeScript**. Bun handles transpilation natively — no separate compile step is needed during development.
