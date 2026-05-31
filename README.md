@@ -143,18 +143,28 @@ The server starts on `http://localhost:3000`.
 ### Verify your deployment
 
 After bringing the container up, run the smoke-test script to confirm the
-server is healthy and the admin API is correctly wired:
+server is healthy, TLS is terminating, security headers are present, and the
+admin API is correctly wired:
 
 ```bash
+# Default: targets https://localhost (the nginx proxy) — no arguments needed
+bash scripts/smoke-test.sh
+
+# With admin org lifecycle checks:
 ADMIN_SECRET=your-secret bash scripts/smoke-test.sh
-# or against a remote deployment:
+
+# Against a remote deployment:
 BASE_URL=https://compliance.your-company.com ADMIN_SECRET=your-secret bash scripts/smoke-test.sh
+
+# Against the web container directly (plain HTTP, skips header checks):
+BASE_URL=http://localhost:3000 ADMIN_SECRET=your-secret bash scripts/smoke-test.sh
 ```
 
-The script checks `/health`, creates a temporary test org via `POST /admin/orgs`,
-confirms it appears in `GET /admin/orgs`, and removes it with
-`DELETE /admin/orgs/:id`. It prints a pass/fail summary and exits 0 only when
-all checks succeed.
+The script checks `/health`, verifies `Strict-Transport-Security` and
+`X-Content-Type-Options` headers (when targeting HTTPS), creates a temporary
+test org via `POST /admin/orgs`, confirms it appears in `GET /admin/orgs`, and
+removes it with `DELETE /admin/orgs/:id`. It prints a pass/fail summary and
+exits 0 only when all checks succeed.
 
 Set `COMPLIANCE_BACKEND_URL` in your GitHub Actions workflow to point to the
 public URL where you've deployed this container:

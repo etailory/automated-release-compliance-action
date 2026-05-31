@@ -1,13 +1,16 @@
-#!/usr/bin/env bash
+#!/bin/sh
 # Governor OS — operator smoke-test
 # Usage:
+#   bash scripts/smoke-test.sh
+#   ADMIN_SECRET=your-secret bash scripts/smoke-test.sh
+#   BASE_URL=https://compliance.your-company.com ADMIN_SECRET=your-secret bash scripts/smoke-test.sh
 #   BASE_URL=http://localhost:3000 ADMIN_SECRET=your-secret bash scripts/smoke-test.sh
 #
 # Exits 0 if all checks pass; exits 1 on any failure.
 
-set -euo pipefail
+set -eu
 
-BASE_URL="${BASE_URL:-http://localhost:3000}"
+BASE_URL="${BASE_URL:-https://localhost}"
 SMOKE_ORG_ID="smoke-test-$(date +%s)"
 
 PASS=0
@@ -18,12 +21,20 @@ pass() { echo "[PASS] $1"; PASS=$((PASS + 1)); }
 fail() { echo "[FAIL] $1"; FAIL=$((FAIL + 1)); }
 skip() { echo "[SKIP] $1"; SKIP=$((SKIP + 1)); }
 
+# Pass -k to curl when targeting HTTPS so self-signed certificates are accepted
+case "$BASE_URL" in
+  https://*) CURL_OPTS="-k" ;;
+  *)         CURL_OPTS="" ;;
+esac
+
 echo "Governor OS smoke test — ${BASE_URL}"
 echo "--------------------------------------------"
 
 # ── 1. Health check ─────────────────────────────────────────────────────────
-status=$(curl -s -o /dev/null -w "%{http_code}" "${BASE_URL}/health")
-body=$(curl -s "${BASE_URL}/health")
+# shellcheck disable=SC2086
+status=$(curl -s $CURL_OPTS -o /dev/null -w "%{http_code}" "${BASE_URL}/health")
+# shellcheck disable=SC2086
+body=$(curl -s $CURL_OPTS "${BASE_URL}/health")
 
 if [ "$status" = "200" ] && echo "$body" | grep -q '"status":"ok"'; then
   pass "GET /health → 200 {\"status\":\"ok\"}"
@@ -31,7 +42,30 @@ else
   fail "GET /health → expected 200 {\"status\":\"ok\"}, got HTTP ${status}: ${body}"
 fi
 
-# ── 2–4. Admin org lifecycle (requires ADMIN_SECRET) ─────────────────────────
+# ── 2. Security headers (HTTPS only) ─────────────────────────────────────────
+case "$BASE_URL" in
+  https://*)
+    # shellcheck disable=SC2086
+    headers=$(curl -s $CURL_OPTS -I "${BASE_URL}/health")
+
+    if echo "$headers" | grep -qi "strict-transport-security:"; then
+      pass "Strict-Transport-Security header present"
+    else
+      fail "Strict-Transport-Security header missing from /health response"
+    fi
+
+    if echo "$headers" | grep -qi "x-content-type-options:"; then
+      pass "X-Content-Type-Options header present"
+    else
+      fail "X-Content-Type-Options header missing from /health response"
+    fi
+    ;;
+  *)
+    skip "Security header checks — skipped for non-HTTPS BASE_URL"
+    ;;
+esac
+
+# ── 3–5. Admin org lifecycle (requires ADMIN_SECRET) ─────────────────────────
 if [ -z "${ADMIN_SECRET:-}" ]; then
   skip "POST /admin/orgs  — ADMIN_SECRET not set, skipping admin checks"
   skip "GET  /admin/orgs  — ADMIN_SECRET not set, skipping admin checks"
@@ -39,8 +73,9 @@ if [ -z "${ADMIN_SECRET:-}" ]; then
 else
   AUTH_HEADER="Authorization: Bearer ${ADMIN_SECRET}"
 
-  # 2. Create test org
-  status=$(curl -s -o /dev/null -w "%{http_code}" \
+  # 3. Create test org
+  # shellcheck disable=SC2086
+  status=$(curl -s $CURL_OPTS -o /dev/null -w "%{http_code}" \
     -X POST "${BASE_URL}/admin/orgs" \
     -H "Content-Type: application/json" \
     -H "${AUTH_HEADER}" \
@@ -52,9 +87,11 @@ else
     fail "POST /admin/orgs → expected 201, got HTTP ${status}"
   fi
 
-  # 3. Verify org appears in list
-  list_body=$(curl -s "${BASE_URL}/admin/orgs" -H "${AUTH_HEADER}")
-  list_status=$(curl -s -o /dev/null -w "%{http_code}" "${BASE_URL}/admin/orgs" -H "${AUTH_HEADER}")
+  # 4. Verify org appears in list
+  # shellcheck disable=SC2086
+  list_body=$(curl -s $CURL_OPTS "${BASE_URL}/admin/orgs" -H "${AUTH_HEADER}")
+  # shellcheck disable=SC2086
+  list_status=$(curl -s $CURL_OPTS -o /dev/null -w "%{http_code}" "${BASE_URL}/admin/orgs" -H "${AUTH_HEADER}")
 
   if [ "$list_status" = "200" ] && echo "$list_body" | grep -q "\"id\":\"${SMOKE_ORG_ID}\""; then
     pass "GET  /admin/orgs → 200 (test org present)"
@@ -62,8 +99,9 @@ else
     fail "GET  /admin/orgs → expected 200 with org ${SMOKE_ORG_ID}, got HTTP ${list_status}: ${list_body}"
   fi
 
-  # 4. Delete test org
-  del_status=$(curl -s -o /dev/null -w "%{http_code}" \
+  # 5. Delete test org
+  # shellcheck disable=SC2086
+  del_status=$(curl -s $CURL_OPTS -o /dev/null -w "%{http_code}" \
     -X DELETE "${BASE_URL}/admin/orgs/${SMOKE_ORG_ID}" \
     -H "${AUTH_HEADER}")
 
