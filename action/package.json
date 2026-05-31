@@ -1,7 +1,7 @@
 {
   "name": "governor-os-compliance-action",
   "version": "1.0.0",
-  "description": "Governor OS GitHub Action — thin alias pointing to dist/index.js",
+  "description": "Governor OS GitHub Action — automated release compliance verification for regulated industries",
   "engines": {
     "node": ">=20"
   },

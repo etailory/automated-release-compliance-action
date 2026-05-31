@@ -48,45 +48,10 @@ jobs:
       - uses: markgrendev/automated-release-compliance-action@dev
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          # Compliance profile: 'iso27001', 'soc2', 'dora', or 'default'
           compliance-profile: iso27001
           # Write durable audit evidence and archive it as a CI artifact:
           report-path: compliance-report.json
           # license-key: ${{ secrets.GOVERNOR_LICENSE_KEY }}
-      - uses: actions/upload-artifact@v4
-        with:
-          name: release-compliance-report
-          path: compliance-report.json
-```
-
-### Compliance profiles (`compliance-profile`)
-
-Select a compliance profile to enforce industry-specific release standards. Each profile
-runs the 5 default checks plus one additional domain rule:
-
-| Profile | Extra rule added |
-| --- | --- |
-| `default` | — (5 checks) |
-| `iso27001` | Release notes acknowledge a security review or confirm no security impact (6 checks) |
-| `soc2` | Release notes include evidence of testing or QA sign-off (6 checks) |
-| `dora` | Release notes include a risk or impact assessment for operational resilience (6 checks) |
-
-```yaml
-name: ISO 27001 Release Compliance
-on:
-  release:
-    types: [published]
-
-jobs:
-  compliance:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: markgrendev/automated-release-compliance-action@main
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          compliance-profile: iso27001
-          report-path: compliance-report.json
-          fail-on-incomplete: "true"
       - uses: actions/upload-artifact@v4
         with:
           name: release-compliance-report
@@ -108,26 +73,19 @@ a release was checked against the checklist at publish time.
   "tier": "free",
   "repository": "acme/widgets",
   "release": { "tag": "v1.2.0", "name": "Spring Release", "isPrerelease": false, "isDraft": false, "publishedAt": "2026-05-30T00:00:00Z", "author": "octocat", "url": "https://github.com/acme/widgets/releases/tag/v1.2.0" },
-  "profile": "default",
-  "compliance": { "passed": true, "score": 5, "total": 5, "checks": [ /* … */ ] }
+  "compliance": { "passed": true, "score": 3, "total": 3, "checks": [ /* … */ ] }
 }
 ```
 
-| Input | Required | Default | Description |
-| --- | --- | --- | --- |
-| `github-token` | yes | — | Token used to read release/repository context. |
-| `compliance-profile` | no | `default` | Compliance rule profile: `default`, `iso27001`, `soc2`, or `dora`. Each profile extends the 5-rule default checklist with one industry-specific rule. |
-| `report-path` | no | — | Path to write the JSON compliance report. Omit to skip. |
-| `fail-on-incomplete` | no | `false` | Fail the job if the checklist does not pass. |
-| `license-key` | no | — | Enables the (stubbed) premium audit bridge. |
+| Input | Required | Description |
+| --- | --- | --- |
+| `github-token` | yes | Token used to read release/repository context. |
+| `compliance-profile` | no | Compliance framework: `iso27001`, `soc2`, `dora`, or `general` (default). |
+| `report-path` | no | Path to write the JSON compliance report. Omit to skip. |
+| `fail-on-incomplete` | no | Fail the job if the checklist does not pass (default `false`). |
+| `license-key` | no | Enables the (stubbed) premium audit bridge. |
 
-| Output | Description |
-| --- | --- |
-| `passed` | `true` if the release satisfied the compliance checklist, otherwise `false`. |
-| `score` | Fraction of checks passed (e.g. `4/5`). |
-| `tier` | Which tier ran: `free` or `premium`. |
-| `profile` | The compliance profile that was applied: `default`, `iso27001`, `soc2`, or `dora`. |
-| `report-path` | Path of the written JSON compliance report (only set when `report-path` input is provided). |
+Outputs: `passed`, `score`, `tier`, and `report-path` (set when a report was written).
 
 ## Development
 
@@ -152,9 +110,10 @@ cd web && npm install      # install web server dependencies
 ## Project layout
 
 ```
-action/             GitHub Action alias — delegates to dist/index.js
-  action.yml        Action metadata + input/output contract (mirrors root action.yml)
-  package.json      Minimal package metadata (no separate deps; uses bundled dist/)
+action/             GitHub Action implementation (node20, OIDC-based)
+  action.yml        Action metadata + input/output contract
+  index.js          Entry point: free-tier + premium OIDC compliance
+  package.json      Action dependencies (@actions/core, @actions/github)
 web/                Express API server for premium audit trail generation
   server.js         REST API: /api/v1/compliance/verify + /audit
   package.json      Web server dependencies (express)
