@@ -487,7 +487,11 @@ paths:
                     type: string
                     example: "Compliance audit job queued for acme/widgets@v1.2.0. Poll GET /api/v1/compliance/audit/audit-acme_widgets-v1.2.0-1748692800000 for status."
         "400":
-          description: Missing required fields (schemaVersion, repository, or release.tag)
+          description: |
+            Missing required fields (schemaVersion, repository, or release.tag), or in
+            registry-enforced multi-tenant mode the `repository` owner does not match
+            the authenticated organization's `orgId`. The token is valid — the payload
+            is malformed relative to the caller's identity.
           content:
             application/json:
               schema:

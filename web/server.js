@@ -525,6 +525,19 @@ app.post('/api/v1/compliance/audit', auditLimiter, async (req, res) => {
       });
     }
 
+    // Org scope enforcement: when authenticated with a specific orgId in registry-enforced
+    // mode, the submitted repository owner must match the authenticated org. orgId is null in
+    // single-tenant LICENSE_SECRET mode — skip the check in that case.
+    if (authResult?.orgId && isRegistryEnforced()) {
+      const repoOwner = (repository ?? '').split('/')[0];
+      if (repoOwner !== authResult.orgId) {
+        return res.status(400).json({
+          success: false,
+          error:   `Repository owner '${repoOwner}' does not match authenticated organization '${authResult.orgId}'. Submissions must be for your own organization's repositories.`,
+        });
+      }
+    }
+
     const auditJob = await enqueueAuditJob({ authToken: bearerToken, repository, release, requested });
 
     return res.status(202).json({

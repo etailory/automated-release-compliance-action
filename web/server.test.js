@@ -438,6 +438,60 @@ describe('GET /api/v1/compliance/audit/:jobId', () => {
 });
 
 // ---------------------------------------------------------------------------
+// POST /api/v1/compliance/audit — org scope
+// ---------------------------------------------------------------------------
+
+describe('POST /api/v1/compliance/audit — org scope', () => {
+  test('returns 400 when token org does not match repository owner (cross-org submission)', async () => {
+    orgRegistry.set('acme-corp', { licenseKey: 'lk-acme', allowedSubs: ['repo:acme/*'] });
+    orgRegistry.set('other-corp', { licenseKey: 'lk-other', allowedSubs: ['repo:other/*'] });
+
+    // acme-corp token, but repository owner is other-corp
+    const crossOrgPayload = { ...VALID_AUDIT_PAYLOAD, repository: 'other-corp/widgets' };
+    const { status, body } = await req(
+      'POST', '/api/v1/compliance/audit', crossOrgPayload,
+      { Authorization: 'Bearer lk-acme' }
+    );
+    assert.equal(status, 400);
+    assert.equal(body.success, false);
+    assert.match(body.error, /does not match authenticated organization/);
+  });
+
+  test('returns 202 when token org matches repository owner (same-org submission)', async () => {
+    orgRegistry.set('acme', { licenseKey: 'lk-acme', allowedSubs: ['repo:acme/*'] });
+
+    // repository owner is 'acme', matching the authenticated orgId
+    const sameOrgPayload = { ...VALID_AUDIT_PAYLOAD, repository: 'acme/widgets' };
+    const { status, body } = await req(
+      'POST', '/api/v1/compliance/audit', sameOrgPayload,
+      { Authorization: 'Bearer lk-acme' }
+    );
+    assert.equal(status, 202);
+    assert.equal(body.success, true);
+  });
+
+  test('returns 202 in dev mode (empty registry) regardless of repository owner', async () => {
+    // beforeEach clears registry — dev mode is the default
+    const { status } = await req(
+      'POST', '/api/v1/compliance/audit', VALID_AUDIT_PAYLOAD,
+      { Authorization: 'Bearer any-key' }
+    );
+    assert.equal(status, 202);
+  });
+
+  test('returns 202 in single-tenant LICENSE_SECRET mode (null orgId — no owner check)', async () => {
+    process.env.LICENSE_SECRET = 'single-tenant-key';
+
+    // repository owner deliberately does not match any org name — check must be skipped
+    const { status } = await req(
+      'POST', '/api/v1/compliance/audit', VALID_AUDIT_PAYLOAD,
+      { Authorization: 'Bearer single-tenant-key' }
+    );
+    assert.equal(status, 202);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // GET /api/v1/compliance/audit/:jobId — auth (enforcement mode)
 // ---------------------------------------------------------------------------
 
@@ -766,7 +820,8 @@ describe('POST /api/v1/compliance/verify — org registry', () => {
 
 describe('POST /api/v1/compliance/audit — org registry', () => {
   test('returns 202 when authenticated via valid session token for registered org', async () => {
-    orgRegistry.set('acme-corp', {
+    // Use org ID 'acme' to match VALID_AUDIT_PAYLOAD's repository owner ('acme/widgets')
+    orgRegistry.set('acme', {
       licenseKey:  'lk-acme-test',
       allowedSubs: ['repo:owner/repo*'],
     });
@@ -775,7 +830,7 @@ describe('POST /api/v1/compliance/audit — org registry', () => {
     const oidcToken = await mintOidcJwt();
     const { body: vBody } = await req('POST', '/api/v1/compliance/verify', {
       ...VALID_VERIFY_BODY,
-      organizationId: 'acme-corp',
+      organizationId: 'acme',
       oidcToken,
     });
     assert.equal(vBody.success, true, 'Expected verify to succeed');
@@ -815,7 +870,8 @@ describe('POST /api/v1/compliance/audit — org registry', () => {
   });
 
   test('returns 202 when license key matches a registered org (multi-tenant mode)', async () => {
-    orgRegistry.set('acme-corp', {
+    // Use org ID 'acme' to match VALID_AUDIT_PAYLOAD's repository owner ('acme/widgets')
+    orgRegistry.set('acme', {
       licenseKey:  'lk-acme-multitenant',
       allowedSubs: ['repo:owner/repo*'],
     });
