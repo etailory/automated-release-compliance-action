@@ -145,6 +145,7 @@ export async function run(): Promise<void> {
       integrityHash = writeComplianceReport(
         reportPath, release, repo, evaluation, tier, generatedAt, commits, profile
       );
+      core.setOutput("integrity-hash", integrityHash);
     }
 
     await reportFreeTier(

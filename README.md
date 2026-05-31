@@ -73,7 +73,9 @@ a release was checked against the checklist at publish time.
   "tier": "free",
   "repository": "acme/widgets",
   "release": { "tag": "v1.2.0", "name": "Spring Release", "isPrerelease": false, "isDraft": false, "publishedAt": "2026-05-30T00:00:00Z", "author": "octocat", "url": "https://github.com/acme/widgets/releases/tag/v1.2.0" },
-  "compliance": { "passed": true, "score": 3, "total": 3, "checks": [ /* … */ ] }
+  "compliance": { "passed": true, "score": 3, "total": 3, "checks": [ /* … */ ] },
+  "commits": { "count": 12, "authors": ["octocat", "codercat"], "firstSha": "abc1234", "lastSha": "def5678" },
+  "integrityHash": "a3f1e2b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2"
 }
 ```
 
@@ -92,6 +94,7 @@ a release was checked against the checklist at publish time.
 | `tier` | Which tier ran: `'free'` or `'premium'`. |
 | `profile` | Compliance profile that was evaluated: `'iso27001'`, `'soc2'`, `'dora'`, or `'default'`. |
 | `report-path` | Path of the written JSON compliance report, if `report-path` input was provided. |
+| `integrity-hash` | SHA-256 hex digest of the compliance report artifact. Only set when `report-path` is provided. |
 | `audit-verdict` | **Premium only.** Governance verdict from the backend: `'approved'`, `'conditional'`, or `'blocked'`. |
 
 ## Deploy the backend

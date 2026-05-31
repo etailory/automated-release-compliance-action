@@ -23228,6 +23228,7 @@ async function run() {
     let integrityHash;
     if (reportPath) {
       integrityHash = writeComplianceReport(reportPath, release, repo, evaluation, tier, generatedAt, commits, profile);
+      core.setOutput("integrity-hash", integrityHash);
     }
     await reportFreeTier(repo, release, evaluation, profile, tier, generatedAt, reportPath || undefined, integrityHash);
     core.setOutput("passed", String(evaluation.passed));
