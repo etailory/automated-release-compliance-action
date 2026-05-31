@@ -570,21 +570,20 @@ app.get('/api/v1/compliance/audit/:jobId', async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// POST /admin/orgs
+// Admin auth helper
 //
-// Register or update an organization in the registry at runtime without a
-// server restart. Protected by the ADMIN_SECRET env var.
-//
-// Expected request body: { id, licenseKey, allowedSubs }
+// Verifies the ADMIN_SECRET bearer token. Sends the error response and
+// returns false when the request is not authorized; returns true otherwise.
 // ---------------------------------------------------------------------------
 
-app.post('/admin/orgs', async (req, res) => {
+function checkAdminAuth(req, res) {
   const adminSecret = process.env.ADMIN_SECRET;
   if (!adminSecret) {
-    return res.status(503).json({
+    res.status(503).json({
       success: false,
       error:   'Admin endpoint is disabled (ADMIN_SECRET not configured).',
     });
+    return false;
   }
 
   const authHeader = req.headers['authorization'] ?? '';
@@ -603,8 +602,24 @@ app.post('/admin/orgs', async (req, res) => {
   }
 
   if (!authorized) {
-    return res.status(401).json({ success: false, error: 'Unauthorized.' });
+    res.status(401).json({ success: false, error: 'Unauthorized.' });
+    return false;
   }
+
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// POST /admin/orgs
+//
+// Register or update an organization in the registry at runtime without a
+// server restart. Protected by the ADMIN_SECRET env var.
+//
+// Expected request body: { id, licenseKey, allowedSubs }
+// ---------------------------------------------------------------------------
+
+app.post('/admin/orgs', async (req, res) => {
+  if (!checkAdminAuth(req, res)) return;
 
   const { id, licenseKey, allowedSubs } = req.body ?? {};
   if (
@@ -622,6 +637,52 @@ app.post('/admin/orgs', async (req, res) => {
   await _flushOrgsToFile();
   console.log(`[/admin/orgs] Registered org: ${id}`);
   return res.status(200).json({ success: true, message: `Organization '${id}' registered.` });
+});
+
+// ---------------------------------------------------------------------------
+// GET /admin/orgs
+//
+// Returns the full list of registered organizations as a JSON array.
+// License keys are intentionally omitted — they are write-only secrets.
+// Protected by the ADMIN_SECRET env var.
+//
+// Response: [{ id, allowedSubs }]
+// ---------------------------------------------------------------------------
+
+app.get('/admin/orgs', (req, res) => {
+  if (!checkAdminAuth(req, res)) return;
+
+  const orgs = [];
+  for (const [id, entry] of orgRegistry) {
+    orgs.push({ id, allowedSubs: entry.allowedSubs });
+  }
+  return res.status(200).json(orgs);
+});
+
+// ---------------------------------------------------------------------------
+// DELETE /admin/orgs/:id
+//
+// Removes an organization from the in-memory registry and immediately flushes
+// the updated registry to disk. Protected by the ADMIN_SECRET env var.
+//
+// Response: 200 { success: true, message } | 404 { success: false, error }
+// ---------------------------------------------------------------------------
+
+app.delete('/admin/orgs/:id', async (req, res) => {
+  if (!checkAdminAuth(req, res)) return;
+
+  const { id } = req.params;
+  if (!orgRegistry.has(id)) {
+    return res.status(404).json({
+      success: false,
+      error:   `Organization '${id}' is not registered.`,
+    });
+  }
+
+  orgRegistry.delete(id);
+  await _flushOrgsToFile();
+  console.log(`[/admin/orgs] Removed org: ${id}`);
+  return res.status(200).json({ success: true, message: `Organization '${id}' removed.` });
 });
 
 // ---------------------------------------------------------------------------

@@ -967,6 +967,149 @@ describe('File persistence — audit log', () => {
 });
 
 // ---------------------------------------------------------------------------
+// GET /admin/orgs
+// ---------------------------------------------------------------------------
+
+describe('GET /admin/orgs', () => {
+  test('returns 503 when ADMIN_SECRET is not configured', async () => {
+    const { status, body } = await req('GET', '/admin/orgs', undefined, {
+      Authorization: 'Bearer any-secret',
+    });
+    assert.equal(status, 503);
+    assert.equal(body.success, false);
+  });
+
+  test('returns 401 on wrong secret', async () => {
+    process.env.ADMIN_SECRET = 'correct-admin-secret';
+    const { status, body } = await req('GET', '/admin/orgs', undefined, {
+      Authorization: 'Bearer wrong-secret',
+    });
+    assert.equal(status, 401);
+    assert.equal(body.success, false);
+  });
+
+  test('returns 401 when Authorization header is absent', async () => {
+    process.env.ADMIN_SECRET = 'correct-admin-secret';
+    const { status, body } = await req('GET', '/admin/orgs');
+    assert.equal(status, 401);
+    assert.equal(body.success, false);
+  });
+
+  test('returns 200 with empty array when registry is empty', async () => {
+    process.env.ADMIN_SECRET = 'admin-secret';
+    const { status, body } = await req('GET', '/admin/orgs', undefined, {
+      Authorization: 'Bearer admin-secret',
+    });
+    assert.equal(status, 200);
+    assert.ok(Array.isArray(body));
+    assert.equal(body.length, 0);
+  });
+
+  test('returns all registered orgs without licenseKey', async () => {
+    process.env.ADMIN_SECRET = 'admin-secret';
+    orgRegistry.set('org-alpha', { licenseKey: 'lk-secret-alpha', allowedSubs: ['repo:alpha/*'] });
+    orgRegistry.set('org-beta',  { licenseKey: 'lk-secret-beta',  allowedSubs: ['repo:beta/*'] });
+
+    const { status, body } = await req('GET', '/admin/orgs', undefined, {
+      Authorization: 'Bearer admin-secret',
+    });
+    assert.equal(status, 200);
+    assert.ok(Array.isArray(body));
+    assert.equal(body.length, 2);
+
+    const alpha = body.find(o => o.id === 'org-alpha');
+    assert.ok(alpha);
+    assert.deepEqual(alpha.allowedSubs, ['repo:alpha/*']);
+    assert.equal('licenseKey' in alpha, false, 'licenseKey must not be returned');
+
+    const beta = body.find(o => o.id === 'org-beta');
+    assert.ok(beta);
+    assert.equal('licenseKey' in beta, false, 'licenseKey must not be returned');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// DELETE /admin/orgs/:id
+// ---------------------------------------------------------------------------
+
+describe('DELETE /admin/orgs/:id', () => {
+  test('returns 503 when ADMIN_SECRET is not configured', async () => {
+    const { status, body } = await req('DELETE', '/admin/orgs/some-org', undefined, {
+      Authorization: 'Bearer any-secret',
+    });
+    assert.equal(status, 503);
+    assert.equal(body.success, false);
+  });
+
+  test('returns 401 on wrong secret', async () => {
+    process.env.ADMIN_SECRET = 'correct-admin-secret';
+    const { status, body } = await req('DELETE', '/admin/orgs/some-org', undefined, {
+      Authorization: 'Bearer wrong-secret',
+    });
+    assert.equal(status, 401);
+    assert.equal(body.success, false);
+  });
+
+  test('returns 404 when org is not registered', async () => {
+    process.env.ADMIN_SECRET = 'admin-secret';
+    const { status, body } = await req('DELETE', '/admin/orgs/unknown-org', undefined, {
+      Authorization: 'Bearer admin-secret',
+    });
+    assert.equal(status, 404);
+    assert.equal(body.success, false);
+    assert.match(body.error, /unknown-org/);
+  });
+
+  test('returns 200 and removes org from the in-memory registry', async () => {
+    process.env.ADMIN_SECRET = 'admin-secret';
+    orgRegistry.set('del-org', { licenseKey: 'lk-del', allowedSubs: ['repo:del/*'] });
+
+    const { status, body } = await req('DELETE', '/admin/orgs/del-org', undefined, {
+      Authorization: 'Bearer admin-secret',
+    });
+    assert.equal(status, 200);
+    assert.equal(body.success, true);
+    assert.match(body.message, /del-org/);
+    assert.equal(orgRegistry.has('del-org'), false, 'Org must be removed from registry');
+  });
+
+  test('flushes updated registry to disk after deletion', async () => {
+    process.env.ADMIN_SECRET = 'admin-secret';
+    orgRegistry.set('flush-org-a', { licenseKey: 'lk-a', allowedSubs: ['repo:a/*'] });
+    orgRegistry.set('flush-org-b', { licenseKey: 'lk-b', allowedSubs: ['repo:b/*'] });
+
+    // Delete one org
+    const { status } = await req('DELETE', '/admin/orgs/flush-org-a', undefined, {
+      Authorization: 'Bearer admin-secret',
+    });
+    assert.equal(status, 200);
+
+    // Persisted file must contain only flush-org-b
+    const raw  = await readFile(process.env.ORGS_FILE, 'utf8');
+    const orgs = JSON.parse(raw);
+    assert.ok(Array.isArray(orgs));
+    assert.equal(orgs.find(o => o.id === 'flush-org-a'), undefined, 'Deleted org must not be in file');
+    assert.ok(orgs.find(o => o.id === 'flush-org-b'), 'Remaining org must still be in file');
+  });
+
+  test('second delete of same org returns 404', async () => {
+    process.env.ADMIN_SECRET = 'admin-secret';
+    orgRegistry.set('once-org', { licenseKey: 'lk-once', allowedSubs: ['repo:once/*'] });
+
+    await req('DELETE', '/admin/orgs/once-org', undefined, {
+      Authorization: 'Bearer admin-secret',
+    });
+
+    // Second delete — org no longer exists
+    const { status, body } = await req('DELETE', '/admin/orgs/once-org', undefined, {
+      Authorization: 'Bearer admin-secret',
+    });
+    assert.equal(status, 404);
+    assert.equal(body.success, false);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // validateLicenseKey (unit tests — no HTTP)
 // ---------------------------------------------------------------------------
 
