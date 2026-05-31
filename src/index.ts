@@ -7,7 +7,7 @@ import * as github from "@actions/github";
 import { evaluateChecklist, getRulesForProfile } from "./checklist.js";
 import { runPremiumAudit } from "./premium.js";
 import { buildComplianceReport, serializeReport } from "./report.js";
-import type { Release, Repo, EvaluateResult, ActionContext, ComplianceProfile } from "./types.js";
+import type { Release, Repo, EvaluateResult, ActionContext, ComplianceProfile, CommitMetadata, Logger } from "./types.js";
 
 /**
  * Pull a normalized release object out of the event payload.
@@ -60,6 +60,64 @@ export function parseReleaseFromContext(context: ActionContext): {
   };
 }
 
+/**
+ * Fetch the commits that make up a release by comparing the current tag against
+ * its predecessor via the GitHub API. Best-effort: returns `undefined` and logs a
+ * warning if the previous tag cannot be determined or the API call fails.
+ */
+export async function fetchReleaseCommits(
+  octokit: ReturnType<typeof github.getOctokit>,
+  repo: Repo,
+  currentTag: string,
+  logger: Logger
+): Promise<CommitMetadata | undefined> {
+  try {
+    const tagsResponse = await octokit.rest.repos.listTags({
+      owner: repo.owner,
+      repo: repo.repo,
+      per_page: 10,
+    });
+
+    const tags = tagsResponse.data.map((t) => t.name);
+    const currentIndex = tags.indexOf(currentTag);
+
+    if (currentIndex === -1) {
+      logger.warning(`Tag ${currentTag} not found in recent tags list; skipping commit enrichment.`);
+      return undefined;
+    }
+
+    const previousTag = tags[currentIndex + 1];
+    if (!previousTag) {
+      logger.warning(`No previous tag found for ${currentTag}; skipping commit enrichment.`);
+      return undefined;
+    }
+
+    const compareResponse = await octokit.rest.repos.compareCommitsWithBasehead({
+      owner: repo.owner,
+      repo: repo.repo,
+      basehead: `${previousTag}...${currentTag}`,
+    });
+
+    const commits = compareResponse.data.commits;
+    const authorsSet = new Set<string>();
+    for (const commit of commits) {
+      const author = commit.author?.login ?? commit.commit.author?.name ?? "unknown";
+      authorsSet.add(author);
+    }
+
+    logger.info(`Commit enrichment: ${commits.length} commits by [${[...authorsSet].join(", ")}] between ${previousTag} and ${currentTag}.`);
+
+    return {
+      count: commits.length,
+      authors: [...authorsSet],
+      shas: commits.map((c) => c.sha),
+    };
+  } catch (err) {
+    logger.warning(`Failed to fetch commit metadata: ${(err as Error).message}; skipping commit enrichment.`);
+    return undefined;
+  }
+}
+
 /** Render the free-tier checklist results to the GitHub job summary + log. */
 async function reportFreeTier(
   release: Release,
@@ -110,7 +168,8 @@ function writeComplianceReport(
   release: Release,
   repo: Repo,
   evaluation: EvaluateResult,
-  tier: "free" | "premium"
+  tier: "free" | "premium",
+  commits?: CommitMetadata
 ): void {
   const report = buildComplianceReport({
     release,
@@ -118,6 +177,7 @@ function writeComplianceReport(
     evaluation,
     tier,
     generatedAt: new Date().toISOString(),
+    commits,
   });
 
   const dir = dirname(reportPath);
@@ -171,12 +231,25 @@ export async function run(): Promise<void> {
     // --- Audit evidence: optional durable JSON report. ------------------------
     if (reportPath) {
       const repo = context.repo ?? { owner: "", repo: "" };
-      writeComplianceReport(reportPath, release, repo, evaluation, tier);
+
+      // Best-effort commit enrichment — only available on `release` events.
+      let commits: CommitMetadata | undefined;
+      if (context.payload?.release) {
+        const octokit = github.getOctokit(token);
+        const logger: Logger = {
+          info: (m: string) => core.info(m),
+          warning: (m: string) => core.warning(m),
+          debug: (m: string) => core.debug(m),
+        };
+        commits = await fetchReleaseCommits(octokit, repo, release.tag, logger);
+      } else {
+        core.debug("Not a release event; skipping commit enrichment.");
+      }
+
+      writeComplianceReport(reportPath, release, repo, evaluation, tier, commits);
     }
 
     if (licenseKey) {
-      // `token` will be used by the future backend bridge to enrich the audit.
-      void token;
       await runPremiumAudit({
         licenseKey,
         release,

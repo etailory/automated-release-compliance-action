@@ -90,3 +90,31 @@ test("serializeReport produces parseable JSON with a trailing newline", () => {
   expect(json.endsWith("\n")).toBe(true);
   expect(JSON.parse(json)).toEqual(report);
 });
+
+test("buildComplianceReport includes commits block when provided", () => {
+  const evaluation = evaluateChecklist(RELEASE.body);
+  const commits = { count: 3, authors: ["alice", "bob"], shas: ["abc", "def", "ghi"] };
+  const report = buildComplianceReport({
+    release: RELEASE,
+    repo: REPO,
+    evaluation,
+    tier: "free",
+    generatedAt: AT,
+    commits,
+  });
+
+  expect(report.commits).toEqual(commits);
+});
+
+test("buildComplianceReport omits commits block when not provided", () => {
+  const evaluation = evaluateChecklist(RELEASE.body);
+  const report = buildComplianceReport({
+    release: RELEASE,
+    repo: REPO,
+    evaluation,
+    tier: "free",
+    generatedAt: AT,
+  });
+
+  expect(report.commits).toBeUndefined();
+});
