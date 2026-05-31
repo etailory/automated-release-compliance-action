@@ -139,7 +139,8 @@ async function req(method, path, body, headers = {}) {
   };
   if (body !== undefined) opts.body = JSON.stringify(body);
   const res  = await fetch(`${baseUrl}${path}`, opts);
-  const json = await res.json();
+  const text = await res.text();
+  const json = text ? JSON.parse(text) : null;
   return { status: res.status, body: json };
 }
 
@@ -199,6 +200,22 @@ describe('GET /health', () => {
     assert.equal(status, 200);
     assert.equal(body.status, 'ok');
     assert.equal(body.service, 'governor-os-web');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GET /openapi.yaml
+// ---------------------------------------------------------------------------
+
+describe('GET /openapi.yaml', () => {
+  test('returns 200 with YAML content-type and openapi 3.0 marker', async () => {
+    const res = await fetch(`${baseUrl}/openapi.yaml`);
+    assert.equal(res.status, 200);
+    assert.ok(res.headers.get('content-type')?.startsWith('text/yaml'));
+    const text = await res.text();
+    assert.ok(text.includes('openapi:'), 'spec must contain openapi key');
+    assert.ok(text.includes('/health'), 'spec must document /health endpoint');
+    assert.ok(text.includes('/admin/orgs'), 'spec must document /admin/orgs endpoint');
   });
 });
 
@@ -783,14 +800,14 @@ describe('POST /admin/orgs', () => {
     assert.equal(body.success, false);
   });
 
-  test('returns 200 and registers org when correct ADMIN_SECRET is provided', async () => {
+  test('returns 201 and registers org when correct ADMIN_SECRET is provided', async () => {
     process.env.ADMIN_SECRET = 'admin-secret-key';
     const { status, body } = await req(
       'POST', '/admin/orgs',
       { id: 'new-org', licenseKey: 'lk-new', allowedSubs: ['repo:new/*'] },
       { Authorization: 'Bearer admin-secret-key' }
     );
-    assert.equal(status, 200);
+    assert.equal(status, 201);
     assert.equal(body.success, true);
     assert.ok(orgRegistry.has('new-org'));
     const entry = orgRegistry.get('new-org');
@@ -798,15 +815,16 @@ describe('POST /admin/orgs', () => {
     assert.deepEqual(entry.allowedSubs, ['repo:new/*']);
   });
 
-  test('returns 200 and updates an existing org', async () => {
+  test('returns 201 and updates an existing org', async () => {
     process.env.ADMIN_SECRET = 'admin-secret-key';
     orgRegistry.set('existing-org', { licenseKey: 'lk-old', allowedSubs: ['repo:old/*'] });
 
-    await req(
+    const { status } = await req(
       'POST', '/admin/orgs',
       { id: 'existing-org', licenseKey: 'lk-updated', allowedSubs: ['repo:new/*'] },
       { Authorization: 'Bearer admin-secret-key' }
     );
+    assert.equal(status, 201);
     const entry = orgRegistry.get('existing-org');
     assert.equal(entry.licenseKey, 'lk-updated');
   });
@@ -889,7 +907,7 @@ describe('File persistence — org registry', () => {
       { id: 'persist-org', licenseKey: 'lk-persist', allowedSubs: ['repo:persist/*'] },
       { Authorization: 'Bearer admin-secret' }
     );
-    assert.equal(status, 200);
+    assert.equal(status, 201);
     assert.equal(body.success, true);
 
     const raw  = await readFile(process.env.ORGS_FILE, 'utf8');
@@ -1060,16 +1078,14 @@ describe('DELETE /admin/orgs/:id', () => {
     assert.match(body.error, /unknown-org/);
   });
 
-  test('returns 200 and removes org from the in-memory registry', async () => {
+  test('returns 204 and removes org from the in-memory registry', async () => {
     process.env.ADMIN_SECRET = 'admin-secret';
     orgRegistry.set('del-org', { licenseKey: 'lk-del', allowedSubs: ['repo:del/*'] });
 
-    const { status, body } = await req('DELETE', '/admin/orgs/del-org', undefined, {
+    const { status } = await req('DELETE', '/admin/orgs/del-org', undefined, {
       Authorization: 'Bearer admin-secret',
     });
-    assert.equal(status, 200);
-    assert.equal(body.success, true);
-    assert.match(body.message, /del-org/);
+    assert.equal(status, 204);
     assert.equal(orgRegistry.has('del-org'), false, 'Org must be removed from registry');
   });
 
@@ -1082,7 +1098,7 @@ describe('DELETE /admin/orgs/:id', () => {
     const { status } = await req('DELETE', '/admin/orgs/flush-org-a', undefined, {
       Authorization: 'Bearer admin-secret',
     });
-    assert.equal(status, 200);
+    assert.equal(status, 204);
 
     // Persisted file must contain only flush-org-b
     const raw  = await readFile(process.env.ORGS_FILE, 'utf8');

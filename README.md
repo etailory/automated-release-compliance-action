@@ -108,6 +108,7 @@ cp .env.example .env          # fill in SESSION_SECRET, ADMIN_SECRET, LICENSE_SE
 docker compose up -d
 # Verify: curl http://localhost:3000/health
 # → {"status":"ok","service":"governor-os-web","version":"1.0.0"}
+# OpenAPI spec: curl http://localhost:3000/openapi.yaml
 ```
 
 The `docker-compose.yml` at the repo root builds the `web/` image, mounts a

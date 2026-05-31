@@ -46,10 +46,10 @@ else
     -H "${AUTH_HEADER}" \
     -d "{\"id\":\"${SMOKE_ORG_ID}\",\"licenseKey\":\"smoke-key-$(date +%s)\",\"allowedSubs\":[\"repo:smoke/*\"]}")
 
-  if [ "$status" = "200" ]; then
-    pass "POST /admin/orgs → 200 (org created)"
+  if [ "$status" = "201" ]; then
+    pass "POST /admin/orgs → 201 (org created)"
   else
-    fail "POST /admin/orgs → expected 200, got HTTP ${status}"
+    fail "POST /admin/orgs → expected 201, got HTTP ${status}"
   fi
 
   # 3. Verify org appears in list
@@ -67,10 +67,10 @@ else
     -X DELETE "${BASE_URL}/admin/orgs/${SMOKE_ORG_ID}" \
     -H "${AUTH_HEADER}")
 
-  if [ "$del_status" = "200" ]; then
-    pass "DELETE /admin/orgs/:id → 200 (org removed)"
+  if [ "$del_status" = "204" ]; then
+    pass "DELETE /admin/orgs/:id → 204 (org removed)"
   else
-    fail "DELETE /admin/orgs/:id → expected 200, got HTTP ${del_status}"
+    fail "DELETE /admin/orgs/:id → expected 204, got HTTP ${del_status}"
   fi
 fi
 

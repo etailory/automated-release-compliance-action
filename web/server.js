@@ -636,7 +636,7 @@ app.post('/admin/orgs', async (req, res) => {
   orgRegistry.set(id, { licenseKey, allowedSubs });
   await _flushOrgsToFile();
   console.log(`[/admin/orgs] Registered org: ${id}`);
-  return res.status(200).json({ success: true, message: `Organization '${id}' registered.` });
+  return res.status(201).json({ success: true, message: `Organization '${id}' registered.` });
 });
 
 // ---------------------------------------------------------------------------
@@ -682,7 +682,7 @@ app.delete('/admin/orgs/:id', async (req, res) => {
   orgRegistry.delete(id);
   await _flushOrgsToFile();
   console.log(`[/admin/orgs] Removed org: ${id}`);
-  return res.status(200).json({ success: true, message: `Organization '${id}' removed.` });
+  return res.status(204).end();
 });
 
 // ---------------------------------------------------------------------------
@@ -721,6 +721,21 @@ app.get('/admin/audit-jobs', (req, res) => {
   });
 
   return res.status(200).json(jobs);
+});
+
+// ---------------------------------------------------------------------------
+// GET /openapi.yaml — serve the OpenAPI 3.0 specification
+// ---------------------------------------------------------------------------
+
+app.get('/openapi.yaml', async (_req, res) => {
+  try {
+    const specPath = path.join(path.dirname(fileURLToPath(import.meta.url)), 'openapi.yaml');
+    const content  = await fs.readFile(specPath, 'utf8');
+    res.setHeader('Content-Type', 'text/yaml; charset=utf-8');
+    res.send(content);
+  } catch {
+    res.status(503).json({ error: 'OpenAPI spec unavailable.' });
+  }
 });
 
 // ---------------------------------------------------------------------------
