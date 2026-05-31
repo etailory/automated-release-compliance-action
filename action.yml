@@ -1,5 +1,5 @@
 name: "Automated Release Compliance Governor"
-description: "Scan published GitHub releases against a compliance checklist. Free tier runs locally; premium tier bridges to a hosted AI audit backend."
+description: "Automated release compliance checklist for GitHub Actions. Checks releases against ISO 27001, SOC 2, and DORA rules and produces a machine-readable audit evidence report."
 author: "markgrendev"
 
 branding:
