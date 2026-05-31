@@ -1,0 +1,59 @@
+name: Claude Autonomous Loop
+
+on:
+  issues:
+    types: [labeled]
+
+# Prevent overlapping iterations of the loop.
+concurrency:
+  group: claude-autonomous
+  cancel-in-progress: false
+
+jobs:
+  autonomous:
+    # Only run when an issue gets the `claude-auto` label.
+    if: github.event.label.name == 'claude-auto'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write        # commit/push to dev
+      issues: write          # comment, close, and create follow-up issues
+      pull-requests: write
+      id-token: write
+    steps:
+      - name: Checkout dev branch
+        uses: actions/checkout@v6
+        with:
+          ref: dev
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run Claude Autonomous Loop
+        uses: anthropics/claude-code-action@main
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Automation mode: run from a direct prompt (no @claude mention needed).
+          prompt: |
+            You are running the Governor OS autonomous development loop.
+
+            REPOSITORY:   ${{ github.repository }}
+            ISSUE_NUMBER: ${{ github.event.issue.number }}
+            ISSUE_TITLE:  ${{ github.event.issue.title }}
+            BRANCH:       dev
+
+            Follow the process in .github/AUTONOMOUS_LOOP.md EXACTLY, in order:
+              1. Implement the issue above (smallest deployable MVP increment).
+              2. Review your own diff and fix every finding.
+              3. Commit and push DIRECTLY to the `dev` branch (no pull request).
+              4. Comment the result on issue #${{ github.event.issue.number }}
+                 and close it if fully resolved.
+              5. Decide the next best step toward the MVP in README.md and open a
+                 NEW issue for it with `gh issue create`, tagging @claude in the
+                 body and applying the `claude-auto` label so this loop continues.
+
+            Never push to `main`. Keep each iteration small and shippable.
+          claude_args: |
+            --model claude-sonnet-4-6
+            --max-turns 40
+            --allowedTools "Bash(bun install),Bash(bun test),Bash(bun run build),Bash(bun typecheck),Bash,Edit,Write,Read,Glob,Grep"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

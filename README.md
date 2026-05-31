@@ -45,13 +45,45 @@ jobs:
   compliance:
     runs-on: ubuntu-latest
     steps:
-      - uses: markgrendev/automated-release-compliance-action/action@main
+      - uses: markgrendev/automated-release-compliance-action@main
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          # anthropic-federation-rule-id: ${{ secrets.FEDERATION_RULE_ID }}
-          # anthropic-organization-id: ${{ secrets.ORG_ID }}
-          # anthropic-service-account-id: ${{ secrets.SERVICE_ACCOUNT_ID }}
+          # Write durable audit evidence and archive it as a CI artifact:
+          report-path: compliance-report.json
+          # license-key: ${{ secrets.GOVERNOR_LICENSE_KEY }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-compliance-report
+          path: compliance-report.json
 ```
+
+### Audit evidence (`report-path`)
+
+Set the optional `report-path` input to have the action write a schema-versioned,
+machine-readable JSON compliance report. This is the first durable piece of the
+Governor OS audit trail: archive it as a CI artifact and an auditor can later prove
+a release was checked against the checklist at publish time.
+
+```jsonc
+{
+  "schemaVersion": "1.0",
+  "generatedAt": "2026-05-31T12:00:00.000Z",
+  "tool": { "name": "automated-release-compliance-action", "version": "0.1.0" },
+  "tier": "free",
+  "repository": "acme/widgets",
+  "release": { "tag": "v1.2.0", "name": "Spring Release", "isPrerelease": false, "isDraft": false, "publishedAt": "2026-05-30T00:00:00Z", "author": "octocat", "url": "https://github.com/acme/widgets/releases/tag/v1.2.0" },
+  "compliance": { "passed": true, "score": 3, "total": 3, "checks": [ /* … */ ] }
+}
+```
+
+| Input | Required | Description |
+| --- | --- | --- |
+| `github-token` | yes | Token used to read release/repository context. |
+| `report-path` | no | Path to write the JSON compliance report. Omit to skip. |
+| `fail-on-incomplete` | no | Fail the job if the checklist does not pass (default `false`). |
+| `license-key` | no | Enables the (stubbed) premium audit bridge. |
+
+Outputs: `passed`, `score`, `tier`, and `report-path` (set when a report was written).
 
 ## Development
 
@@ -87,6 +119,7 @@ src/                TypeScript compliance checklist library (Bun)
   types.ts          Shared TypeScript interfaces
   checklist.ts      Free-tier compliance rules
   index.ts          Action entry point
+  report.ts         Audit-evidence report builder (free-tier JSON report)
   premium.ts        Premium bridge stub
 dist/               Bundled output built via bun build
 test/               Unit tests (bun:test, TypeScript)

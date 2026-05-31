@@ -22712,6 +22712,8 @@ var require_github = __commonJS((exports) => {
 // src/index.ts
 var core = __toESM(require_core(), 1);
 var github = __toESM(require_github(), 1);
+import { mkdirSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 
 // src/checklist.ts
 var ISSUE_REFERENCE = /(#\d+)|(\/issues\/\d+)|(\/pull\/\d+)|\b[A-Z][A-Z0-9]+-\d+\b/;
@@ -22853,6 +22855,40 @@ async function runPremiumAudit({
   return { prepared: true, endpoint: BACKEND_ENDPOINT, payload };
 }
 
+// src/report.ts
+var REPORT_SCHEMA_VERSION = "1.0";
+var TOOL_NAME = "automated-release-compliance-action";
+var TOOL_VERSION = "0.1.0";
+function buildComplianceReport(params) {
+  const { release, repo, evaluation, tier, generatedAt } = params;
+  return {
+    schemaVersion: REPORT_SCHEMA_VERSION,
+    generatedAt,
+    tool: { name: TOOL_NAME, version: TOOL_VERSION },
+    tier,
+    repository: `${repo.owner}/${repo.repo}`,
+    release: {
+      tag: release.tag,
+      name: release.name,
+      isPrerelease: release.isPrerelease,
+      isDraft: release.isDraft,
+      publishedAt: release.publishedAt,
+      author: release.author,
+      url: release.url
+    },
+    compliance: {
+      passed: evaluation.passed,
+      score: evaluation.score,
+      total: evaluation.total,
+      checks: evaluation.results.map((r) => ({ ...r }))
+    }
+  };
+}
+function serializeReport(report) {
+  return `${JSON.stringify(report, null, 2)}
+`;
+}
+
 // src/index.ts
 function parseReleaseFromContext(context2) {
   const payload = context2.payload ?? {};
@@ -22913,6 +22949,22 @@ async function reportFreeTier(release, evaluation, profile) {
   }
 }
 var VALID_PROFILES = ["default", "iso27001", "soc2", "dora"];
+function writeComplianceReport(reportPath, release, repo, evaluation, tier) {
+  const report = buildComplianceReport({
+    release,
+    repo,
+    evaluation,
+    tier,
+    generatedAt: new Date().toISOString()
+  });
+  const dir = dirname(reportPath);
+  if (dir && dir !== ".") {
+    mkdirSync(dir, { recursive: true });
+  }
+  writeFileSync(reportPath, serializeReport(report), "utf8");
+  core.info(`Wrote compliance report to ${reportPath}`);
+  core.setOutput("report-path", reportPath);
+}
 async function run() {
   try {
     const token = core.getInput("github-token", { required: true });
@@ -22920,6 +22972,7 @@ async function run() {
     const failOnIncomplete = core.getBooleanInput("fail-on-incomplete");
     const rawProfile = core.getInput("compliance-profile").trim().toLowerCase();
     const profile = VALID_PROFILES.includes(rawProfile) ? rawProfile : "default";
+    const reportPath = core.getInput("report-path");
     const context2 = github.context;
     const { release, body } = parseReleaseFromContext(context2);
     if (!release) {
@@ -22938,6 +22991,10 @@ async function run() {
     core.setOutput("profile", profile);
     const tier = licenseKey ? "premium" : "free";
     core.setOutput("tier", tier);
+    if (reportPath) {
+      const repo = context2.repo ?? { owner: "", repo: "" };
+      writeComplianceReport(reportPath, release, repo, evaluation, tier);
+    }
     if (licenseKey) {
       await runPremiumAudit({
         licenseKey,

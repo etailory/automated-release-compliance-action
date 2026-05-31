@@ -27,6 +27,11 @@ inputs:
     required: false
     default: "default"
 
+  report-path:
+    description: "Optional path to write a machine-readable JSON compliance report (audit evidence). When set, a schema-versioned report is written and can be archived as a CI artifact. When omitted, no file is written."
+    required: false
+    default: ""
+
 outputs:
   passed:
     description: "'true' if the release satisfied the compliance checklist for the selected profile, otherwise 'false'."
@@ -36,6 +41,8 @@ outputs:
     description: "Which tier ran: 'free' or 'premium'."
   profile:
     description: "The compliance profile that was applied: 'default', 'iso27001', 'soc2', or 'dora'."
+  report-path:
+    description: "Path of the written JSON compliance report, if 'report-path' was provided."
 
 runs:
   using: "node20"

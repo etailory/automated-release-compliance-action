@@ -76,3 +76,41 @@ export interface ActionContext {
 }
 
 export type ComplianceProfile = "default" | "iso27001" | "soc2" | "dora";
+
+/**
+ * A durable, machine-readable record of a single release compliance evaluation.
+ *
+ * This is the free-tier "audit evidence" artifact: a schema-versioned, timestamped
+ * snapshot that auditors can archive (e.g. as a CI artifact) to prove a release was
+ * checked against the compliance checklist at publish time.
+ */
+export interface ComplianceReport {
+  /** Schema version of this report shape (independent of the tool version). */
+  schemaVersion: string;
+  /** ISO-8601 timestamp of when the report was generated. */
+  generatedAt: string;
+  /** The tool that produced the report. */
+  tool: {
+    name: string;
+    version: string;
+  };
+  /** Which tier produced the evaluation. */
+  tier: "free" | "premium";
+  /** `owner/repo` the release belongs to. */
+  repository: string;
+  release: {
+    tag: string;
+    name: string;
+    isPrerelease: boolean;
+    isDraft: boolean;
+    publishedAt: string | null;
+    author: string | null;
+    url: string | null;
+  };
+  compliance: {
+    passed: boolean;
+    score: number;
+    total: number;
+    checks: CheckResult[];
+  };
+}
