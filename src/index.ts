@@ -4,10 +4,10 @@ import { dirname } from "node:path";
 import * as core from "@actions/core";
 import * as github from "@actions/github";
 
-import { evaluateChecklist } from "./checklist.js";
+import { evaluateChecklist, getRulesForProfile } from "./checklist.js";
 import { runPremiumAudit } from "./premium.js";
 import { buildComplianceReport, serializeReport } from "./report.js";
-import type { Release, Repo, EvaluateResult, ActionContext } from "./types.js";
+import type { Release, Repo, EvaluateResult, ActionContext, ComplianceProfile } from "./types.js";
 
 /**
  * Pull a normalized release object out of the event payload.
@@ -63,11 +63,12 @@ export function parseReleaseFromContext(context: ActionContext): {
 /** Render the free-tier checklist results to the GitHub job summary + log. */
 async function reportFreeTier(
   release: Release,
-  evaluation: EvaluateResult
+  evaluation: EvaluateResult,
+  profile: ComplianceProfile
 ): Promise<void> {
   core.info("─".repeat(60));
   core.info(`Release compliance check — ${release.name} (${release.tag})`);
-  core.info(`Result: ${evaluation.score}/${evaluation.total} checks passed`);
+  core.info(`Profile: ${profile} | Result: ${evaluation.score}/${evaluation.total} checks passed`);
 
   for (const item of evaluation.results) {
     const mark = item.ok ? "✅" : "❌";
@@ -80,7 +81,7 @@ async function reportFreeTier(
       .addHeading("Release Compliance Report", 2)
       .addRaw(`**Release:** \`${release.tag}\` — ${release.name}\n\n`)
       .addRaw(
-        `**Result:** ${evaluation.score}/${evaluation.total} checks passed (tier: free)\n`
+        `**Profile:** \`${profile}\` | **Result:** ${evaluation.score}/${evaluation.total} checks passed (tier: free)\n`
       )
       .addTable([
         [
@@ -95,6 +96,8 @@ async function reportFreeTier(
     core.debug(`Could not write job summary: ${(err as Error).message}`);
   }
 }
+
+const VALID_PROFILES: ComplianceProfile[] = ["default", "iso27001", "soc2", "dora"];
 
 /**
  * Write a durable, machine-readable compliance report to disk so it can be
@@ -132,6 +135,10 @@ export async function run(): Promise<void> {
     const token = core.getInput("github-token", { required: true });
     const licenseKey = core.getInput("license-key");
     const failOnIncomplete = core.getBooleanInput("fail-on-incomplete");
+    const rawProfile = core.getInput("compliance-profile").trim().toLowerCase();
+    const profile: ComplianceProfile = (VALID_PROFILES as string[]).includes(rawProfile)
+      ? (rawProfile as ComplianceProfile)
+      : "default";
     const reportPath = core.getInput("report-path");
 
     const context = github.context as ActionContext;
@@ -144,15 +151,18 @@ export async function run(): Promise<void> {
       core.setOutput("passed", "false");
       core.setOutput("score", "0");
       core.setOutput("tier", licenseKey ? "premium" : "free");
+      core.setOutput("profile", profile);
       return;
     }
 
     // --- Free tier: always runs, fully local. ---------------------------------
-    const evaluation = evaluateChecklist(body, { release });
-    await reportFreeTier(release, evaluation);
+    const rules = getRulesForProfile(profile);
+    const evaluation = evaluateChecklist(body, { release }, rules);
+    await reportFreeTier(release, evaluation, profile);
 
     core.setOutput("passed", String(evaluation.passed));
     core.setOutput("score", `${evaluation.score}/${evaluation.total}`);
+    core.setOutput("profile", profile);
 
     // --- Premium gate: only when a license key is present. --------------------
     const tier = licenseKey ? "premium" : "free";

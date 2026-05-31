@@ -22712,10 +22712,17 @@ var require_github = __commonJS((exports) => {
 // src/index.ts
 var core = __toESM(require_core(), 1);
 var github = __toESM(require_github(), 1);
+import { mkdirSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 
 // src/checklist.ts
 var ISSUE_REFERENCE = /(#\d+)|(\/issues\/\d+)|(\/pull\/\d+)|\b[A-Z][A-Z0-9]+-\d+\b/;
 var MIN_DESCRIPTION_WORDS = 8;
+var MIN_BODY_CHARS = 80;
+var CHANGELOG_HEADER = /^#{1,3}\s*(what'?s\s+changed|change\s*log|changes|breaking\s+changes|release\s+notes)/im;
+var SECURITY_NOTE = /security\s+(review|assessment|impact|note|scan|fix)|no\s+security\s+impact|cve[-\s]?\d|vulnerabilit/i;
+var TESTING_EVIDENCE = /tested|test\s+coverage|qa\s+sign[- ]?off|regression\s+test|test\s+plan|ci\s+pass/i;
+var RISK_IMPACT = /risk\s+(assessment|level|impact)|impact\s+(analysis|assessment)|rollback\s+plan|blast\s+radius|criticality|rto\b|rpo\b/i;
 var DEFAULT_RULES = [
   {
     id: "has-description",
@@ -22737,8 +22744,54 @@ var DEFAULT_RULES = [
       const placeholders = ["no changes", "tbd", "todo", "n/a", "wip"];
       return !placeholders.includes(normalized);
     }
+  },
+  {
+    id: "has-changelog-section",
+    label: "Release notes include a changelog or 'What's Changed' section heading",
+    test: (body) => CHANGELOG_HEADER.test(body)
+  },
+  {
+    id: "meets-min-length",
+    label: `Release notes are at least ${MIN_BODY_CHARS} characters`,
+    test: (body) => body.trim().length >= MIN_BODY_CHARS
   }
 ];
+var ISO27001_RULES = [
+  ...DEFAULT_RULES,
+  {
+    id: "has-security-note",
+    label: "Release notes acknowledge security review or confirm no security impact",
+    test: (body) => SECURITY_NOTE.test(body)
+  }
+];
+var SOC2_RULES = [
+  ...DEFAULT_RULES,
+  {
+    id: "has-testing-evidence",
+    label: "Release notes include evidence of testing or QA sign-off",
+    test: (body) => TESTING_EVIDENCE.test(body)
+  }
+];
+var DORA_RULES = [
+  ...DEFAULT_RULES,
+  {
+    id: "has-risk-impact",
+    label: "Release notes include a risk or impact assessment (DORA operational resilience)",
+    test: (body) => RISK_IMPACT.test(body)
+  }
+];
+function getRulesForProfile(profile) {
+  switch (profile) {
+    case "iso27001":
+      return ISO27001_RULES;
+    case "soc2":
+      return SOC2_RULES;
+    case "dora":
+      return DORA_RULES;
+    default:
+      return DEFAULT_RULES;
+  }
+}
 function countWords(text) {
   if (!text)
     return 0;
@@ -22802,6 +22855,40 @@ async function runPremiumAudit({
   return { prepared: true, endpoint: BACKEND_ENDPOINT, payload };
 }
 
+// src/report.ts
+var REPORT_SCHEMA_VERSION = "1.0";
+var TOOL_NAME = "automated-release-compliance-action";
+var TOOL_VERSION = "0.1.0";
+function buildComplianceReport(params) {
+  const { release, repo, evaluation, tier, generatedAt } = params;
+  return {
+    schemaVersion: REPORT_SCHEMA_VERSION,
+    generatedAt,
+    tool: { name: TOOL_NAME, version: TOOL_VERSION },
+    tier,
+    repository: `${repo.owner}/${repo.repo}`,
+    release: {
+      tag: release.tag,
+      name: release.name,
+      isPrerelease: release.isPrerelease,
+      isDraft: release.isDraft,
+      publishedAt: release.publishedAt,
+      author: release.author,
+      url: release.url
+    },
+    compliance: {
+      passed: evaluation.passed,
+      score: evaluation.score,
+      total: evaluation.total,
+      checks: evaluation.results.map((r) => ({ ...r }))
+    }
+  };
+}
+function serializeReport(report) {
+  return `${JSON.stringify(report, null, 2)}
+`;
+}
+
 // src/index.ts
 function parseReleaseFromContext(context2) {
   const payload = context2.payload ?? {};
@@ -22837,10 +22924,10 @@ function parseReleaseFromContext(context2) {
     body: ""
   };
 }
-async function reportFreeTier(release, evaluation) {
+async function reportFreeTier(release, evaluation, profile) {
   core.info("─".repeat(60));
   core.info(`Release compliance check — ${release.name} (${release.tag})`);
-  core.info(`Result: ${evaluation.score}/${evaluation.total} checks passed`);
+  core.info(`Profile: ${profile} | Result: ${evaluation.score}/${evaluation.total} checks passed`);
   for (const item of evaluation.results) {
     const mark = item.ok ? "✅" : "❌";
     core.info(`  ${mark} ${item.label}`);
@@ -22849,7 +22936,7 @@ async function reportFreeTier(release, evaluation) {
   try {
     await core.summary.addHeading("Release Compliance Report", 2).addRaw(`**Release:** \`${release.tag}\` — ${release.name}
 
-`).addRaw(`**Result:** ${evaluation.score}/${evaluation.total} checks passed (tier: free)
+`).addRaw(`**Profile:** \`${profile}\` | **Result:** ${evaluation.score}/${evaluation.total} checks passed (tier: free)
 `).addTable([
       [
         { data: "Status", header: true },
@@ -22861,11 +22948,31 @@ async function reportFreeTier(release, evaluation) {
     core.debug(`Could not write job summary: ${err.message}`);
   }
 }
+var VALID_PROFILES = ["default", "iso27001", "soc2", "dora"];
+function writeComplianceReport(reportPath, release, repo, evaluation, tier) {
+  const report = buildComplianceReport({
+    release,
+    repo,
+    evaluation,
+    tier,
+    generatedAt: new Date().toISOString()
+  });
+  const dir = dirname(reportPath);
+  if (dir && dir !== ".") {
+    mkdirSync(dir, { recursive: true });
+  }
+  writeFileSync(reportPath, serializeReport(report), "utf8");
+  core.info(`Wrote compliance report to ${reportPath}`);
+  core.setOutput("report-path", reportPath);
+}
 async function run() {
   try {
     const token = core.getInput("github-token", { required: true });
     const licenseKey = core.getInput("license-key");
     const failOnIncomplete = core.getBooleanInput("fail-on-incomplete");
+    const rawProfile = core.getInput("compliance-profile").trim().toLowerCase();
+    const profile = VALID_PROFILES.includes(rawProfile) ? rawProfile : "default";
+    const reportPath = core.getInput("report-path");
     const context2 = github.context;
     const { release, body } = parseReleaseFromContext(context2);
     if (!release) {
@@ -22873,14 +22980,21 @@ async function run() {
       core.setOutput("passed", "false");
       core.setOutput("score", "0");
       core.setOutput("tier", licenseKey ? "premium" : "free");
+      core.setOutput("profile", profile);
       return;
     }
-    const evaluation = evaluateChecklist(body, { release });
-    await reportFreeTier(release, evaluation);
+    const rules = getRulesForProfile(profile);
+    const evaluation = evaluateChecklist(body, { release }, rules);
+    await reportFreeTier(release, evaluation, profile);
     core.setOutput("passed", String(evaluation.passed));
     core.setOutput("score", `${evaluation.score}/${evaluation.total}`);
+    core.setOutput("profile", profile);
     const tier = licenseKey ? "premium" : "free";
     core.setOutput("tier", tier);
+    if (reportPath) {
+      const repo = context2.repo ?? { owner: "", repo: "" };
+      writeComplianceReport(reportPath, release, repo, evaluation, tier);
+    }
     if (licenseKey) {
       await runPremiumAudit({
         licenseKey,

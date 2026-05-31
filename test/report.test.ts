@@ -12,7 +12,7 @@ import type { Release, Repo } from "../src/types.js";
 const RELEASE: Release = {
   tag: "v1.2.0",
   name: "Spring Release",
-  body: "Fixes the login regression and updates billing. See #42.",
+  body: "## What's Changed\n\nFixes the login regression and updates the billing integration. All changes tested. See #42.",
   isPrerelease: false,
   isDraft: false,
   publishedAt: "2026-05-30T00:00:00Z",
