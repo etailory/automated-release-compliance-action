@@ -54,6 +54,6 @@ jobs:
           claude_args: |
             --model claude-sonnet-4-6
             --max-turns 40
-            --allowedTools "Bash,Edit,Write,Read,Glob,Grep"
+            --allowedTools "Bash(bun install),Bash(bun test),Bash(bun run build),Bash(bun typecheck),Bash,Edit,Write,Read,Glob,Grep"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
