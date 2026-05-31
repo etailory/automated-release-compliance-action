@@ -30,6 +30,7 @@ import {
   _flushOrgsToFile,
   _loadOrgsFromEnv,
   _findJobsInAuditLog,
+  _verifyAuditRecord,
 } from './server.js';
 
 // ---------------------------------------------------------------------------
@@ -2045,7 +2046,7 @@ describe('GET /api/v1/compliance/audits/export — CSV output', () => {
     await req('POST', '/api/v1/compliance/audit', VALID_AUDIT_PAYLOAD, AUTH);
     const { text } = await reqRaw('/api/v1/compliance/audits/export', AUTH);
     const firstLine = text.split('\n')[0];
-    assert.equal(firstLine, 'jobId,repository,tag,profile,verdict,submittedAt,completedAt');
+    assert.equal(firstLine, 'jobId,repository,tag,profile,verdict,submittedAt,completedAt,verified');
   });
 
   test('returns Content-Disposition attachment header for CSV', async () => {
@@ -2094,7 +2095,7 @@ describe('GET /api/v1/compliance/audits/export — CSV output', () => {
     assert.equal(status, 200);
     const lines = text.trim().split('\n');
     assert.equal(lines.length, 1, 'Only the header row for empty log');
-    assert.equal(lines[0], 'jobId,repository,tag,profile,verdict,submittedAt,completedAt');
+    assert.equal(lines[0], 'jobId,repository,tag,profile,verdict,submittedAt,completedAt,verified');
   });
 });
 
@@ -2129,6 +2130,8 @@ describe('GET /api/v1/compliance/audits/export — JSON output', () => {
     assert.ok('verdict'     in row, 'must have verdict');
     assert.ok('submittedAt' in row, 'must have submittedAt');
     assert.ok('completedAt' in row, 'must have completedAt');
+    assert.ok('verified'    in row, 'must have verified');
+    assert.equal(typeof row.verified, 'boolean', 'verified must be a boolean');
   });
 
   test('JSON export contains correct field values', async () => {
@@ -2274,5 +2277,202 @@ describe('GET /api/v1/compliance/audits/export — rate limiting', () => {
     assert.ok(tooMany.length >= 1, 'Expected at least one 429 response');
     assert.equal(tooMany[0].body.success, false);
     assert.match(tooMany[0].body.error, /Too many/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// HMAC audit integrity — _verifyAuditRecord (unit tests)
+// ---------------------------------------------------------------------------
+
+describe('_verifyAuditRecord — unit tests', () => {
+  test('returns false for a record with no sig field', () => {
+    const record = {
+      jobId: 'j1', repository: 'acme/widgets', tag: 'v1.0.0',
+      submittedAt: '2026-01-01T00:00:00Z', completedAt: '2026-01-01T00:00:01Z',
+      status: 'complete', result: { governanceVerdict: { verdict: 'approved' } },
+    };
+    assert.equal(_verifyAuditRecord(record), false);
+  });
+
+  test('returns false for null input', () => {
+    assert.equal(_verifyAuditRecord(null), false);
+  });
+
+  test('returns false when sig is empty string', () => {
+    const record = { jobId: 'j1', sig: '' };
+    assert.equal(_verifyAuditRecord(record), false);
+  });
+
+  test('returns true for a record with a correctly computed sig', async () => {
+    const AUTH = { Authorization: 'Bearer test-key' };
+    const { body: post } = await req('POST', '/api/v1/compliance/audit', VALID_AUDIT_PAYLOAD, AUTH);
+
+    const content = await readFile(process.env.AUDIT_LOG_FILE, 'utf8');
+    const record = JSON.parse(content.trim().split('\n')[0]);
+
+    assert.ok(typeof record.sig === 'string', 'record must have a sig field');
+    assert.ok(record.sig.length === 64, 'sig must be a 64-char hex string (SHA256)');
+    assert.equal(_verifyAuditRecord(record), true, 'freshly written record must verify');
+  });
+
+  test('returns false when a field is tampered with after signing', async () => {
+    const AUTH = { Authorization: 'Bearer test-key' };
+    await req('POST', '/api/v1/compliance/audit', VALID_AUDIT_PAYLOAD, AUTH);
+
+    const content = await readFile(process.env.AUDIT_LOG_FILE, 'utf8');
+    const record = JSON.parse(content.trim().split('\n')[0]);
+
+    assert.equal(_verifyAuditRecord(record), true, 'original record must verify');
+
+    // Tamper: change the repository field
+    const tampered = { ...record, repository: 'evil/tampered' };
+    assert.equal(_verifyAuditRecord(tampered), false, 'tampered record must NOT verify');
+  });
+
+  test('returns false when verdict is tampered with', async () => {
+    const AUTH = { Authorization: 'Bearer test-key' };
+    await req('POST', '/api/v1/compliance/audit', VALID_AUDIT_PAYLOAD, AUTH);
+
+    const content = await readFile(process.env.AUDIT_LOG_FILE, 'utf8');
+    const record = JSON.parse(content.trim().split('\n')[0]);
+
+    const tampered = {
+      ...record,
+      result: {
+        ...record.result,
+        governanceVerdict: { verdict: 'blocked', reason: 'tampered' },
+      },
+    };
+    assert.equal(_verifyAuditRecord(tampered), false, 'verdict tampering must invalidate sig');
+  });
+
+  test('returns false when sig itself is altered', async () => {
+    const AUTH = { Authorization: 'Bearer test-key' };
+    await req('POST', '/api/v1/compliance/audit', VALID_AUDIT_PAYLOAD, AUTH);
+
+    const content = await readFile(process.env.AUDIT_LOG_FILE, 'utf8');
+    const record = JSON.parse(content.trim().split('\n')[0]);
+
+    // Flip one hex char in the sig
+    const alteredSig = record.sig.slice(0, -1) + (record.sig.endsWith('a') ? 'b' : 'a');
+    const tampered = { ...record, sig: alteredSig };
+    assert.equal(_verifyAuditRecord(tampered), false, 'altered sig must not verify');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// HMAC audit integrity — sig field in audit log
+// ---------------------------------------------------------------------------
+
+describe('HMAC audit integrity — sig field in audit log', () => {
+  const AUTH = { Authorization: 'Bearer test-key' };
+
+  test('completed audit job record includes a sig field in NDJSON log', async () => {
+    await req('POST', '/api/v1/compliance/audit', VALID_AUDIT_PAYLOAD, AUTH);
+
+    const content = await readFile(process.env.AUDIT_LOG_FILE, 'utf8');
+    const record = JSON.parse(content.trim().split('\n')[0]);
+
+    assert.ok('sig' in record, 'NDJSON record must include sig field');
+    assert.equal(typeof record.sig, 'string', 'sig must be a string');
+    assert.equal(record.sig.length, 64, 'sig must be a 64-char hex HMAC-SHA256 digest');
+  });
+
+  test('multiple jobs each get distinct sigs', async () => {
+    const p1 = { ...VALID_AUDIT_PAYLOAD, release: { ...VALID_AUDIT_PAYLOAD.release, tag: 'v1.0.0' } };
+    const p2 = { ...VALID_AUDIT_PAYLOAD, release: { ...VALID_AUDIT_PAYLOAD.release, tag: 'v2.0.0' } };
+    await req('POST', '/api/v1/compliance/audit', p1, AUTH);
+    await req('POST', '/api/v1/compliance/audit', p2, AUTH);
+
+    const content = await readFile(process.env.AUDIT_LOG_FILE, 'utf8');
+    const lines   = content.trim().split('\n').filter(Boolean);
+    const sigs    = lines.map(l => JSON.parse(l).sig);
+    assert.notEqual(sigs[0], sigs[1], 'each job must have a unique sig');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// HMAC audit integrity — verified field in list response
+// ---------------------------------------------------------------------------
+
+describe('GET /api/v1/compliance/audits — verified field', () => {
+  const AUTH = { Authorization: 'Bearer test-key' };
+
+  test('each job in the list response includes a verified boolean field', async () => {
+    await req('POST', '/api/v1/compliance/audit', VALID_AUDIT_PAYLOAD, AUTH);
+
+    const { status, body } = await req('GET', '/api/v1/compliance/audits');
+    assert.equal(status, 200);
+    assert.equal(body.jobs.length, 1);
+
+    const job = body.jobs[0];
+    assert.ok('verified' in job, 'each job must have a verified field');
+    assert.equal(typeof job.verified, 'boolean', 'verified must be a boolean');
+  });
+
+  test('freshly written job has verified: true in list response', async () => {
+    await req('POST', '/api/v1/compliance/audit', VALID_AUDIT_PAYLOAD, AUTH);
+
+    const { body } = await req('GET', '/api/v1/compliance/audits');
+    assert.equal(body.jobs[0].verified, true, 'freshly written job must be verified');
+  });
+
+  test('manually injected record without sig has verified: false', async () => {
+    const { writeFile: wf } = await import('node:fs/promises');
+    const record = {
+      jobId: 'j-unsigned', repository: 'acme/widgets', tag: 'v0.9.0',
+      submittedAt: '2026-01-01T00:00:00Z', completedAt: '2026-01-01T00:00:01Z',
+      status: 'complete',
+      result: { governanceVerdict: { verdict: 'approved' } },
+    };
+    await wf(process.env.AUDIT_LOG_FILE, JSON.stringify(record) + '\n', 'utf8');
+
+    const { body } = await req('GET', '/api/v1/compliance/audits');
+    assert.equal(body.jobs.length, 1);
+    assert.equal(body.jobs[0].verified, false, 'record without sig must have verified: false');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// HMAC audit integrity — verified field in export responses
+// ---------------------------------------------------------------------------
+
+describe('GET /api/v1/compliance/audits/export — verified field', () => {
+  const AUTH = { Authorization: 'Bearer test-key' };
+
+  test('JSON export includes verified: true for a freshly written job', async () => {
+    await req('POST', '/api/v1/compliance/audit', VALID_AUDIT_PAYLOAD, AUTH);
+
+    const { body } = await req('GET', '/api/v1/compliance/audits/export?format=json');
+    assert.ok(Array.isArray(body));
+    assert.equal(body.length, 1);
+    assert.equal(body[0].verified, true, 'freshly written job must have verified: true in JSON export');
+  });
+
+  test('JSON export includes verified: false for a tampered record', async () => {
+    const { writeFile: wf } = await import('node:fs/promises');
+    const record = {
+      jobId: 'j-tampered', repository: 'acme/widgets', tag: 'v0.9.0',
+      submittedAt: '2026-01-01T00:00:00Z', completedAt: '2026-01-01T00:00:01Z',
+      status: 'complete',
+      result: { governanceVerdict: { verdict: 'approved' } },
+      sig: 'deadbeef'.repeat(8), // invalid sig
+    };
+    await wf(process.env.AUDIT_LOG_FILE, JSON.stringify(record) + '\n', 'utf8');
+
+    const { body } = await req('GET', '/api/v1/compliance/audits/export?format=json');
+    assert.ok(Array.isArray(body));
+    assert.equal(body.length, 1);
+    assert.equal(body[0].verified, false, 'invalid sig must produce verified: false in JSON export');
+  });
+
+  test('CSV export includes verified column with value true for freshly written job', async () => {
+    await req('POST', '/api/v1/compliance/audit', VALID_AUDIT_PAYLOAD, AUTH);
+
+    const { text } = await reqRaw('/api/v1/compliance/audits/export', AUTH);
+    const lines = text.trim().split('\n');
+    assert.equal(lines.length, 2);
+    assert.ok(lines[0].endsWith(',verified'), 'CSV header must end with ,verified');
+    assert.ok(lines[1].endsWith(',true'), 'CSV data row must end with ,true for a verified record');
   });
 });

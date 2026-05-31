@@ -704,11 +704,53 @@ paths:
                     type: array
                     items:
                       type: object
-                      description: NDJSON audit log record
+                      description: NDJSON audit log record with integrity verification
+                      properties:
+                        jobId:
+                          type: string
+                          example: "audit-acme_widgets-v1.2.0-1748692800000"
+                        repository:
+                          type: string
+                          example: "acme/widgets"
+                        tag:
+                          type: string
+                          example: "v1.2.0"
+                        status:
+                          type: string
+                          enum: [queued, complete]
+                          example: "complete"
+                        submittedAt:
+                          type: string
+                          format: date-time
+                          example: "2026-05-31T12:00:00.000Z"
+                        completedAt:
+                          type: string
+                          format: date-time
+                          example: "2026-05-31T12:00:01.234Z"
+                        sig:
+                          type: string
+                          description: |
+                            HMAC-SHA256 hex digest over the canonical JSON of core fields
+                            (`jobId`, `repository`, `tag`, `submittedAt`, `completedAt`,
+                            `status`, `result.governanceVerdict.verdict`). Derived from
+                            `SESSION_SECRET`. Use `verified` to check tamper evidence
+                            without recomputing the HMAC yourself.
+                          example: "a3f1c2d4e5..."
+                        verified:
+                          type: boolean
+                          description: |
+                            `true` when the `sig` field matches the server-computed HMAC
+                            for this record. `false` when the record has no `sig` (written
+                            before signature support was added) or when the signature does
+                            not match (indicating possible tampering).
+                          example: true
+                        result:
+                          $ref: '#/components/schemas/AuditResult'
                     description: |
                       Array of audit log records sorted by `submittedAt` descending
                       (newest first). Each record mirrors the shape written to the
-                      NDJSON audit log by `POST /api/v1/compliance/audit`.
+                      NDJSON audit log by `POST /api/v1/compliance/audit`, augmented
+                      with a `verified` field indicating HMAC integrity status.
                   pagination:
                     type: object
                     required: [total, limit, offset, hasMore]
@@ -842,15 +884,16 @@ paths:
                 type: string
                 description: |
                   CSV file with columns: `jobId, repository, tag, profile,
-                  verdict, submittedAt, completedAt`. Header row is always present
-                  even when there are no records.
+                  verdict, submittedAt, completedAt, verified`. Header row is always
+                  present even when there are no records. The `verified` column
+                  contains `true` or `false` indicating HMAC integrity status.
             application/json:
               schema:
                 type: array
                 description: JSON array of audit records (same fields as CSV)
                 items:
                   type: object
-                  required: [jobId, repository, tag, profile, verdict, submittedAt, completedAt]
+                  required: [jobId, repository, tag, profile, verdict, submittedAt, completedAt, verified]
                   properties:
                     jobId:
                       type: string
@@ -877,6 +920,13 @@ paths:
                       type: string
                       format: date-time
                       example: "2026-05-31T12:00:01.234Z"
+                    verified:
+                      type: boolean
+                      description: |
+                        `true` when the record's HMAC-SHA256 integrity signature is
+                        valid. `false` for records written before signature support
+                        was added, or if tampering is detected.
+                      example: true
         "400":
           description: Invalid `format`, `from`, or `to` query parameter
           content:

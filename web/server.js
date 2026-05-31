@@ -250,6 +250,7 @@ async function _appendJobToAuditLog(jobId, job) {
       tag:         job.tag,
       result:      job.result,
     };
+    record.sig = _computeAuditSig(record);
     await fs.appendFile(filePath, JSON.stringify(record) + '\n', 'utf8');
   } catch (err) {
     console.error(`[WARN] Failed to append job ${jobId} to audit log:`, err.message);
@@ -313,7 +314,7 @@ export async function _findJobsInAuditLog({ orgId, limit, offset = 0, repository
           if (owner !== orgId) continue;
         }
         if (repository !== null && record.repository !== repository) continue;
-        records.push(record);
+        records.push({ ...record, verified: _verifyAuditRecord(record) });
       } catch { /* skip malformed lines */ }
     }
   } catch (err) {
@@ -379,6 +380,64 @@ function getSessionSecret() {
     _devSecretWarned = true;
   }
   return _devSessionSecret;
+}
+
+// ---------------------------------------------------------------------------
+// HMAC audit integrity
+//
+// Each audit log record is signed with HMAC-SHA256 over a canonical JSON
+// string of its core fields. Uses SESSION_SECRET in production; falls back to
+// a stable constant in dev/test so log records remain verifiable across
+// restarts without a configured secret.
+// ---------------------------------------------------------------------------
+
+const DEV_AUDIT_HMAC_KEY = 'governor-os-dev-audit-hmac-key';
+
+function getAuditHmacKey() {
+  return process.env.SESSION_SECRET ?? DEV_AUDIT_HMAC_KEY;
+}
+
+/**
+ * Compute HMAC-SHA256 hex digest over a fixed-key-ordered canonical JSON
+ * representation of the record's core fields. Key ordering is fixed to
+ * prevent any future key-ordering differences invalidating signatures.
+ *
+ * @param {{ jobId, repository, tag, submittedAt, completedAt, status, result }} record
+ * @returns {string} hex digest
+ */
+function _computeAuditSig(record) {
+  const canonical = JSON.stringify({
+    jobId:       record.jobId       ?? null,
+    repository:  record.repository  ?? null,
+    tag:         record.tag         ?? null,
+    submittedAt: record.submittedAt ?? null,
+    completedAt: record.completedAt ?? null,
+    status:      record.status      ?? null,
+    verdict:     record.result?.governanceVerdict?.verdict ?? null,
+  });
+  return crypto.createHmac('sha256', getAuditHmacKey()).update(canonical).digest('hex');
+}
+
+/**
+ * Verify the HMAC integrity signature on an audit log record.
+ * Returns true when the `sig` field matches the computed HMAC, false otherwise.
+ * Records written before signature support was added will have no `sig` and
+ * return false.
+ *
+ * @param {object} record  Audit log record (as read from NDJSON or returned by the API)
+ * @returns {boolean}
+ */
+export function _verifyAuditRecord(record) {
+  if (!record?.sig || typeof record.sig !== 'string') return false;
+  try {
+    const expected = _computeAuditSig(record);
+    const a = Buffer.from(expected, 'hex');
+    const b = Buffer.from(record.sig, 'hex');
+    if (a.length !== b.length) return false;
+    return crypto.timingSafeEqual(a, b);
+  } catch {
+    return false;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -953,6 +1012,7 @@ app.get('/api/v1/compliance/audits/export', exportAuditsLimiter, async (req, res
         verdict:     r.result?.governanceVerdict?.verdict ?? '',
         submittedAt: r.submittedAt                        ?? '',
         completedAt: r.completedAt                        ?? '',
+        verified:    r.verified ?? false,
       }));
       res.setHeader('Content-Type', 'application/json; charset=utf-8');
       res.setHeader('Content-Disposition', `attachment; filename="audit-export-${dateStr}.json"`);
@@ -960,7 +1020,7 @@ app.get('/api/v1/compliance/audits/export', exportAuditsLimiter, async (req, res
     }
 
     // CSV
-    const CSV_COLS = ['jobId', 'repository', 'tag', 'profile', 'verdict', 'submittedAt', 'completedAt'];
+    const CSV_COLS = ['jobId', 'repository', 'tag', 'profile', 'verdict', 'submittedAt', 'completedAt', 'verified'];
     const csvLines = [CSV_COLS.join(',')];
     for (const r of records) {
       csvLines.push([
@@ -971,6 +1031,7 @@ app.get('/api/v1/compliance/audits/export', exportAuditsLimiter, async (req, res
         escapeCsvField(r.result?.governanceVerdict?.verdict ?? ''),
         escapeCsvField(r.submittedAt),
         escapeCsvField(r.completedAt),
+        escapeCsvField(r.verified ?? false),
       ].join(','));
     }
     const csvBody = csvLines.join('\n') + '\n';
