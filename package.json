@@ -1,6 +1,6 @@
 {
   "name": "automated-release-compliance-action",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "A GitHub Action that checks published releases against compliance checklists for ISO 27001, SOC 2, and DORA.",
   "type": "module",
   "main": "dist/index.js",
