@@ -1,0 +1,49 @@
+name: "Automated Release Compliance Governor"
+description: "Release compliance checklist for GitHub Actions: checks releases against ISO 27001, SOC 2 & DORA, with audit reports."
+author: "markgrendev"
+
+branding:
+  icon: "shield"
+  color: "blue"
+
+inputs:
+  github-token:
+    description: "GitHub token used to read release and repository context (typically secrets.GITHUB_TOKEN)."
+    required: true
+    default: ${{ github.token }}
+
+  fail-on-incomplete:
+    description: "If 'true', the action fails the workflow when the free-tier checklist does not pass. Defaults to 'false' (warn-only)."
+    required: false
+    default: "false"
+
+  compliance-profile:
+    description: "Compliance rule profile to apply. One of: 'default', 'iso27001', 'soc2', 'dora'. Each profile extends the default checklist with industry-specific rules. Defaults to 'default'."
+    required: false
+    default: "default"
+
+  report-path:
+    description: "Optional path to write a machine-readable JSON compliance report (audit evidence). When set, a schema-versioned report is written and can be archived as a CI artifact. When omitted, no file is written."
+    required: false
+    default: ""
+
+  custom-rules-path:
+    description: "Optional path to a JSON file containing additional compliance rules to merge with the selected profile. Enables org-specific controls beyond the built-in checklist."
+    required: false
+    default: ""
+
+outputs:
+  passed:
+    description: "'true' if the release satisfied the compliance checklist for the selected profile, otherwise 'false'."
+  score:
+    description: "Number of checklist items passed out of the total (e.g. '4/5')."
+  profile:
+    description: "The compliance profile that was applied: 'default', 'iso27001', 'soc2', or 'dora'."
+  report-path:
+    description: "Path of the written JSON compliance report, if 'report-path' was provided."
+  integrity-hash:
+    description: "SHA-256 hex digest of the compliance report artifact. Only set when 'report-path' is provided."
+
+runs:
+  using: "node20"
+  main: "dist/index.js"
