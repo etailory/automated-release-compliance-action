@@ -1,8 +1,8 @@
 name: Release Compliance
 
 on:
-  push:
-    branches: [master]
+  release:
+    types: [published]
 
 jobs:
   compliance:
@@ -13,6 +13,6 @@ jobs:
 
     steps:
       - name: Automated Release Compliance Governor
-        uses: etailory/automated-release-compliance-action@v1.0.0
+        uses: etailory/automated-release-compliance-action@v1
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
