@@ -1,0 +1,18 @@
+name: Release Compliance
+
+on:
+  push:
+    branches: [master]
+
+jobs:
+  compliance:
+    name: Automated Release Compliance Governor
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read   # read release and repository context
+
+    steps:
+      - name: Automated Release Compliance Governor
+        uses: etailory/automated-release-compliance-action@v1.0.0
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
