@@ -18,7 +18,7 @@ jobs:
   compliance:
     runs-on: ubuntu-latest
     steps:
-      - uses: markgrendev/automated-release-compliance-action@v1.0.0
+      - uses: etailory/automated-release-compliance-action@v1.0.0
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           compliance-profile: iso27001
@@ -49,7 +49,7 @@ jobs:
       integrity-hash: ${{ steps.compliance.outputs.integrity-hash }}
     steps:
       - id: compliance
-        uses: markgrendev/automated-release-compliance-action@v1.0.0
+        uses: etailory/automated-release-compliance-action@v1.0.0
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           compliance-profile: iso27001

@@ -1,6 +1,6 @@
 name: "Automated Release Compliance Governor"
 description: "Release compliance checklist for GitHub Actions: checks releases against ISO 27001, SOC 2 & DORA, with audit reports."
-author: "markgrendev"
+author: "etailory"
 
 branding:
   icon: "shield"

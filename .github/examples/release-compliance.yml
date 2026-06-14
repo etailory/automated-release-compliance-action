@@ -33,7 +33,7 @@ jobs:
     steps:
       - name: Run compliance audit
         id: compliance
-        uses: markgrendev/automated-release-compliance-action@dev
+        uses: etailory/automated-release-compliance-action@dev
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           compliance-profile: iso27001   # iso27001 | soc2 | dora | general
